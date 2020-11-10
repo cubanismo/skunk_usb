@@ -1,0 +1,6 @@
+*.o
+.*.swp
+*.cof
+*.bin
+*.abs
+virtualjaguar.log
