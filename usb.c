@@ -27,8 +27,8 @@ int bulkcmd(uchar opcode, int blocknum, int blockcount, char* buffer, int len);
 
 int bulkin, bulkout, bulkface, bulkdev;
 int seq = 0xf1f1bab5, zero = 0;
-unsigned int arm = 0x01; // 0x01 = ARM DATA0, 0x41 = ARM DATA1
-#define NEXTSEQ(a) if ((a) & 0x40) (a) &= (~0x40); else (a) |= 0x40
+unsigned int arm = 0x41; // 0x01 = ARM DATA0, 0x41 = ARM DATA1
+#define NEXTARMSEQ() (arm ^= 0x40)
 
 void start() {
 	char buf[2048];
@@ -172,8 +172,7 @@ int bulkcmd(uchar opcode, int blocknum, int blockcount, char* buffer, int len)
 	
 	// Build CBW
 	hwrited = 0x150c001f;				// 0x1500: Command data is always 31 bytes located at 150c.
-	hwrited = 0x00100000 | (bulkdev<<24) | (bulkout<<16) | arm;	// 0x1504: 10 = OUT
-	NEXTSEQ(arm);
+	hwrited = 0x00100000 | (bulkdev<<24) | (bulkout<<16) | NEXTARMSEQ();	// 0x1504: 10 = OUT
 	hwrited = 0x0013152c;				// 0x1508: <residue/pipe/retry> <start of next TD>
 	hwrited = 0x53554342;				// 0x150c: CBW signature (43425355 in little endian land)
 	hwrited = seq++;					// 0x1510: Command Block Tag (it's a sequence number)
@@ -189,18 +188,16 @@ int bulkcmd(uchar opcode, int blocknum, int blockcount, char* buffer, int len)
 	if (len) {
 		hwrited = 0x16000000 | len;		// 0x152c: I/O data starts at 1600
 		if (direction)
-			hwrited = 0x00900000 | (bulkdev<<24) | (bulkin<<16) | arm;	// 0x1530: 90 = IN
+			hwrited = 0x00900000 | (bulkdev<<24) | (bulkin<<16) | NEXTARMSEQ();
 		else
-			hwrited = 0x00100041 | (bulkdev<<24) | (bulkout<<16) | arm;	// 0x1530: 10 = OUT
-		NEXTSEQ(arm);
+			hwrited = 0x00100041 | (bulkdev<<24) | (bulkout<<16) | NEXTARMSEQ();
 		hwrited = 0x00131538;				// 0x1534: <residue/pipe/retry> <start of next TD>
 	}
 	
 	// Build CSW check
 	hwrited = 0x1544000d;				// 0x152c/1538: Status data is always 13 bytes located at 1544.
 	//hwrited = 0x00900041 | (bulkdev<<24) | (bulkin<<16);	// 0x1530/153c: 90 = IN, 1 means 'ARM DATA1'
-	hwrited = 0x00900000 | (bulkdev<<24) | (bulkin<<16) | arm;	// 0x1530/153c: 90 = IN
-	NEXTSEQ(arm);
+	hwrited = 0x00900000 | (bulkdev<<24) | (bulkin<<16) | NEXTARMSEQ();	// 0x1530/153c: 90 = IN
 	hwrited = 0x00130000;				// 0x1534/1540: <residue/pipe/retry> <end of TD list>
 	
 	hw(0x1b0, 0x1500);					// Execute our new TD
@@ -239,7 +236,7 @@ int bulkcmd(uchar opcode, int blocknum, int blockcount, char* buffer, int len)
 					haddr = 0x4004;
 					return i;
 				}
-				NEXTSEQ(arm);
+				NEXTARMSEQ();
 	
 				haddr = 0x1532;		// Second TD entry
 				i = hreadd;
@@ -253,8 +250,7 @@ int bulkcmd(uchar opcode, int blocknum, int blockcount, char* buffer, int len)
 					// Build CSW check
 					haddr = 0x152c;
 					hwrited = 0x1544000d;				// Status data is always 13 bytes located at 1544.
-					hwrited = 0x00900000 | (bulkdev<<24) | (bulkin<<16) | arm;	// 90 = IN
-					NEXTSEQ(arm);
+					hwrited = 0x00900000 | (bulkdev<<24) | (bulkin<<16) | NEXTARMSEQ();	// 90 = IN
 					hwrited = 0x00130000;				// <residue/pipe/retry> <end of TD list>
 					
 					hw(0x1b0, 0x152c);					// Execute our new TD
@@ -268,7 +264,7 @@ int bulkcmd(uchar opcode, int blocknum, int blockcount, char* buffer, int len)
 					haddr = 0x4004;
 					return i;
 				}
-				NEXTSEQ(arm);
+				NEXTARMSEQ();
 				
 				if (olen) {
 					haddr = 0x153e;		// Third TD entry
@@ -278,7 +274,7 @@ int bulkcmd(uchar opcode, int blocknum, int blockcount, char* buffer, int len)
 						haddr = 0x4004;
 						return i;
 					}
-					NEXTSEQ(arm);
+					NEXTARMSEQ();
 	/*				
 					if (rtype & 0x80) {				// We have data to read
 						haddr = 0x152c;
@@ -328,8 +324,7 @@ int usbctlmsg(uchar dev, uchar rtype, uchar request, short value, short index, c
 	haddr = 0x1500;			// TD list base
 	
 	hwrited = 0x150c0008;				// Setup data is always 8 bytes located 150c.
-	hwrited = 0x00d00000 | (dev<<24) | arm;	// d0 = 'setup', control is always EP 0
-	NEXTSEQ(arm);
+	hwrited = 0x00d00000 | (dev<<24) | NEXTARMSEQ();	// d0 = 'setup', control is always EP 0
 	hwrited = 0x00131514;				// <residue/pipe/retry> <start of next TD>
 	hwrite = (rtype) | (request<<8);	// Setup data:  request (MSB), rtype (LSB)
 	hwrite = value;
@@ -340,15 +335,13 @@ int usbctlmsg(uchar dev, uchar rtype, uchar request, short value, short index, c
 		hwrite = 0x152c;				// Default base address for data transfers
 		hwrite = len;
 		hwrite = 0x10 | (dev<<8) | (rtype & 0x80);	// 10 = OUT, 90 = IN (based on rtype)
-		hwrite = arm;					// DATA1 phase -- for some reason
-		NEXTSEQ(arm);
+		hwrite = NEXTARMSEQ();					// DATA1 phase -- for some reason
 		hwrited = 0x00131520;			// <residue/pipe/retry> <start of next TD>
 	}
 	
 	hwrited = i;						// Status phase has no data (should be 00, i avoids clr bug)  
 	hwrite = 0x10 | (dev<<8) | (~rtype & 0x80);		// Opposite of rtype (ACK OUTs with IN, INs with OUT)
-	hwrite = arm;						// DATA1 phase
-	NEXTSEQ(arm);
+	hwrite = NEXTARMSEQ();						// DATA1 phase
 	hwrited = 0x00130000;				// <residue/pipe/retry> <end of TD list>
 	
 	if (!(rtype & 0x80))				// We have data to write
@@ -388,20 +381,20 @@ int usbctlmsg(uchar dev, uchar rtype, uchar request, short value, short index, c
 			i = hreadd & 0xc6000010;
 			if (i != 0)
 				return i;
-			NEXTSEQ(arm);
+			NEXTARMSEQ();
 
 			haddr = 0x151a;		// Second TD entry
 			i = hreadd & 0xc6000010;
 			if (i != 0)
 				return i;
-			NEXTSEQ(arm);
+			NEXTARMSEQ();
 			
 			if (olen) {
 				haddr = 0x1526;		// Third TD entry
 				i = hreadd & 0xc6000010;
 				if (i != 0)
 					return i;
-				NEXTSEQ(arm);
+				NEXTARMSEQ();
 				
 				if (rtype & 0x80) {				// We have data to read
 					haddr = 0x152c;
