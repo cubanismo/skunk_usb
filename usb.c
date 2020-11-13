@@ -26,13 +26,12 @@ int usbctlmsg(uchar dev, uchar rtype, uchar request, short value, short index, c
 int bulkcmd(uchar opcode, int blocknum, int blockcount, char* buffer, int len);
 
 int bulkin, bulkout, bulkface, bulkdev;
-int seq = 0xf1f1bab5, zero = 0;
-unsigned int arm = 0x41; // 0x01 = ARM DATA0, 0x41 = ARM DATA1
-#define NEXTARMSEQ() (arm ^= 0x40)
+int seq = 0x00000001;
+int zero = 0;
 
 void start() {
 	char buf[2048];
-	int s1, s2, s3;
+	int s1, s2, s3, s4;
 
 	skunkRESET();
 	skunkNOP();
@@ -47,15 +46,23 @@ void start() {
 
 	printf("USB1 Initialized\r\n");
 
-	// Test unit ready
 	s1 = usbctlmsg(bulkdev, 0x21, 0xff, 0, bulkface, null, 0);	// Reset the device
 	assert(0 == s1);	// NAKs?
+
+	// Test unit ready
 	s2 = bulkcmd(0, 0, 0, null, 0);
 	printf("bulkcmd returned 0x%08x\r\n", s2);
 	assert(0 == s2);
-	// Get disk size and block size
-	s3 = bulkcmd(0x25, 0, 0, buf, 8);
+
+	// Make an INQUIRY
+	s3 = bulkcmd(0x12, 0, 0, buf, 36);
+	printf("bulkcmd returned 0x%08x\r\n", s3);
 	assert(0 == s3);
+
+	// Get disk size and block size
+	s4 = bulkcmd(0x25, 0, 0, buf, 8);
+	printf("bulkcmd returned 0x%08x\r\n", s4);
+	assert(0 == s4);
 	
 	printf("Done!\r\n");
 	// There's nowhere for us to return!
@@ -82,13 +89,33 @@ short step2[] = {
 	0, 0
 };
 
+// Convert a USB-style 16-bit-word Unicode string to ascii
+static void utf16toascii(char *out, const char *in, int length)
+{
+	const unsigned short *utf = (const unsigned short *)in;
+	int i;
+	for (i = 0; i < (length >> 1); i++) {
+		// USB uses little endian, so byte-swap the word
+		unsigned short swapped = (utf[i] >> 8) | (utf[i] << 8);
+		if (swapped < 0x20 || swapped > 0x7e) {
+			out[i] = '*';
+		} else {
+			out[i] = swapped;
+		}
+	}
+	out[i] = '\0';
+}
+
 // This does NOT currently handle Cruzer Mini 1GB correctly...
 void inithusb1() {
-	int s1, s2, s3, s4, s5, s6;
+	int s1, s2, s3, s4, s5, s6, s7;
 	int i, j, k;
 	char test[256], *p = test;
+	char ascii[128];
+	int manufStrIdx, prodStrIdx, serialStrIdx;
 	int numconfigs, numfaces, numends, setconfig;
 	int isbulk=0;
+	char enSupported = 0;
 	
 	s1=s2=s3=s4=s5=s6=0;
 	bulkin=bulkout=-1;
@@ -115,6 +142,71 @@ void inithusb1() {
 		isbulk = 1;
 		bulkin = 1;
 		bulkout = 1;
+	}
+
+	// Get string language support
+	s7 = usbctlmsg(bulkdev, 0x80, 6, 0x300, 0, (char*)test, 1); 	// Read device string language list size
+	if (!s7) {
+		int size = test[0];
+		const unsigned short *words = (const unsigned short *)&test[2];
+		s7 = usbctlmsg(bulkdev, 0x80, 6, 0x300, 0, (char*)test, size); 	// Read device string language list
+
+		printf("Language IDs supported:\n");
+		for (i = 0; i < (test[0] - 2); i++ ) {
+			// Returned in little-endian, so swap:
+			unsigned short langID = (words[i] << 8) | (words[i] >> 8);
+			printf("    0x%04x\n", langID);
+			if (langID == 0x409) // English (United States)
+				enSupported = 1;
+		}
+	}
+
+	if (enSupported) {
+		// Print out some device info strings
+		manufStrIdx = test[14];
+		prodStrIdx = test[15];
+		serialStrIdx = test[16];
+		printf("Querying Device Manufacturer, string idx %d\n", manufStrIdx);
+		s7 = usbctlmsg(bulkdev, 0x80, 6, 0x300 + manufStrIdx,
+					   0x904 /* 0x409 byte swapped */, (char*)test, 2);
+		if (!s7) {
+			int size = test[0];
+			s7 = usbctlmsg(bulkdev, 0x80, 6, 0x300 + manufStrIdx,
+						   0x904 /* 0x409 byte swapped */, (char*)test, size);
+			assert(s7 == 0);
+			utf16toascii(ascii, &test[2], size - 2);
+			printf("Device Manufacturer: %s\n", ascii);
+		} else {
+			printf("Failed to query device manufacturer");
+		}
+
+		printf("Querying Device Product Name, string idx %d\n", prodStrIdx);
+		s7 = usbctlmsg(bulkdev, 0x80, 6, 0x300 + prodStrIdx,
+					   0x904 /* 0x409 byte swapped */, (char*)test, 2);
+		if (!s7) {
+			int size = test[0];
+			s7 = usbctlmsg(bulkdev, 0x80, 6, 0x300 + prodStrIdx,
+						   0x904 /* 0x409 byte swapped */, (char*)test, size);
+			assert(s7 == 0);
+			utf16toascii(ascii, &test[2], size - 2);
+			printf("Device Product Name: %s\n", ascii);
+		} else {
+			printf("Failed to query device product name");
+		}
+
+		printf("Querying Device Serial Number, string idx %d\n", serialStrIdx);
+		s7 = usbctlmsg(bulkdev, 0x80, 6, 0x300 + serialStrIdx,
+					   0x904 /* 0x409 byte swapped */, (char*)test, 2);
+		if (!s7) {
+			int size = test[0];
+			s7 = usbctlmsg(bulkdev, 0x80, 6, 0x300 + serialStrIdx,
+						   0x904 /* 0x409 byte swapped */, (char*)test, size);
+			assert(s7 == 0);
+			utf16toascii(ascii, &test[2], size - 2);
+			printf("Device Serial Number: %s\n", ascii);
+		} else {
+			printf("Failed to query device serial number");
+		}
 	}
 	
 	// Parse all descriptors until we find the bulk interface
@@ -169,13 +261,14 @@ int bulkcmd(uchar opcode, int blocknum, int blockcount, char* buffer, int len)
 	int direction = (opcode == 0xff) ? 0x0 : 0x80;	// 0 = write, 0x80 = read
 	haddr = 0x4004;
 	haddr = 0x1500;			// TD list base
-	
+
 	// Build CBW
 	hwrited = 0x150c001f;				// 0x1500: Command data is always 31 bytes located at 150c.
-	hwrited = 0x00100000 | (bulkdev<<24) | (bulkout<<16) | NEXTARMSEQ();	// 0x1504: 10 = OUT
+	hwrited = 0x00100001 | (bulkdev<<24) | (bulkout<<16);	// 0x1504: 10 = OUT, 01 = ARM DATA0
 	hwrited = 0x0013152c;				// 0x1508: <residue/pipe/retry> <start of next TD>
 	hwrited = 0x53554342;				// 0x150c: CBW signature (43425355 in little endian land)
-	hwrited = seq++;					// 0x1510: Command Block Tag (it's a sequence number)
+	hwrited = (seq >> 16)|(seq << 16);	// 0x1510: Command Block Tag (it's a sequence number)
+	seq++;
 	hwrited = len<<16;					// 0x1514: Transfer length (little endian)
 	hwrite = direction;					// 0x1518: Direction + LUN (zero)
 	hwrite = 0xc | (opcode<<8);			// 0x151a: We support the 12-byte USB Bootability SCSI subset
@@ -188,16 +281,15 @@ int bulkcmd(uchar opcode, int blocknum, int blockcount, char* buffer, int len)
 	if (len) {
 		hwrited = 0x16000000 | len;		// 0x152c: I/O data starts at 1600
 		if (direction)
-			hwrited = 0x00900000 | (bulkdev<<24) | (bulkin<<16) | NEXTARMSEQ();
+			hwrited = 0x00900001 | (bulkdev<<24) | (bulkin<<16); // 90 = IN, 01 = ARM DATA0
 		else
-			hwrited = 0x00100041 | (bulkdev<<24) | (bulkout<<16) | NEXTARMSEQ();
+			hwrited = 0x00100001 | (bulkdev<<24) | (bulkout<<16); // 10 = OUT, 01 = ARM DATA0
 		hwrited = 0x00131538;				// 0x1534: <residue/pipe/retry> <start of next TD>
 	}
 	
 	// Build CSW check
 	hwrited = 0x1544000d;				// 0x152c/1538: Status data is always 13 bytes located at 1544.
-	//hwrited = 0x00900041 | (bulkdev<<24) | (bulkin<<16);	// 0x1530/153c: 90 = IN, 1 means 'ARM DATA1'
-	hwrited = 0x00900000 | (bulkdev<<24) | (bulkin<<16) | NEXTARMSEQ();	// 0x1530/153c: 90 = IN
+	hwrited = 0x00900001 | (bulkdev<<24) | (bulkin<<16);	// 0x1530/153c: 90 = IN, 01 = ARM DATA0
 	hwrited = 0x00130000;				// 0x1534/1540: <residue/pipe/retry> <end of TD list>
 	
 	hw(0x1b0, 0x1500);					// Execute our new TD
@@ -236,7 +328,6 @@ int bulkcmd(uchar opcode, int blocknum, int blockcount, char* buffer, int len)
 					haddr = 0x4004;
 					return i;
 				}
-				NEXTARMSEQ();
 	
 				haddr = 0x1532;		// Second TD entry
 				i = hreadd;
@@ -247,15 +338,25 @@ int bulkcmd(uchar opcode, int blocknum, int blockcount, char* buffer, int len)
 
 				i &= 0xc6000010;
 				if (0x40 == (i>>24)) {
-					// Build CSW check
+					// Build data section (if there is one)
 					haddr = 0x152c;
+					if (len) {
+						hwrited = 0x16000000 | len;		// 0x152c: I/O data starts at 1600
+						if (direction)
+							hwrited = 0x00900001 | (bulkdev<<24) | (bulkin<<16); // 01 = ARM DATA0
+						else
+							hwrited = 0x00100001 | (bulkdev<<24) | (bulkout<<16); // 01 = ARM DATA0
+						hwrited = 0x00131538;			// 0x1534: <residue/pipe/retry> <start of next TD>
+					}
+
+					// Build CSW check
 					hwrited = 0x1544000d;				// Status data is always 13 bytes located at 1544.
-					hwrited = 0x00900000 | (bulkdev<<24) | (bulkin<<16) | NEXTARMSEQ();	// 90 = IN
+					hwrited = 0x00900001 | (bulkdev<<24) | (bulkin<<16);	// 90 = IN, 01 = ARM DATA0
 					hwrited = 0x00130000;				// <residue/pipe/retry> <end of TD list>
 					
 					hw(0x1b0, 0x152c);					// Execute our new TD
 					retry = 1;
-					printf("--Executing new TD\r\n");
+					printf("--Executing new CSW TD\r\n");
 					haddr = 0x4004;
 					continue;
 				}
@@ -264,7 +365,6 @@ int bulkcmd(uchar opcode, int blocknum, int blockcount, char* buffer, int len)
 					haddr = 0x4004;
 					return i;
 				}
-				NEXTARMSEQ();
 				
 				if (olen) {
 					haddr = 0x153e;		// Third TD entry
@@ -274,7 +374,6 @@ int bulkcmd(uchar opcode, int blocknum, int blockcount, char* buffer, int len)
 						haddr = 0x4004;
 						return i;
 					}
-					NEXTARMSEQ();
 	/*				
 					if (rtype & 0x80) {				// We have data to read
 						haddr = 0x152c;
@@ -288,8 +387,36 @@ int bulkcmd(uchar opcode, int blocknum, int blockcount, char* buffer, int len)
 					}
 					*/
 				}
+
+				haddr = 0x1544;
+				i = hreadd;
+				if (i != 0x53555342) {
+					printf("Invalid CSW signature: 0x%08x\n", i);
+					haddr = 0x4004;
+					haddr = 0x1548;
+				}
+				i = hreadd;
+				i = (i << 16) | (i >> 16);
+				if (i != seq - 1) {
+					printf("Invalid CSW tag: 0x%08x\n", i);
+					printf("      Should be: 0x%08x\n", seq - 1);
+					haddr = 0x4004;
+					haddr = 0x154c;
+				}
+				i = hreadd;
+				i = (i >> 16) | (i << 16);
+				if (i != 0) {
+					printf("CSW Residue: 0x%08x\n", i);
+					haddr = 0x4004;
+					haddr = 0x1550;
+				}
+				i = hread;
+				i &= 0xff;
+				if (i != 0) {
+					printf("CSW status indicates failure: %d\n", i);
+				}
 				
-				return 0;
+				return i;
 			}
 		}
 	}
@@ -324,7 +451,7 @@ int usbctlmsg(uchar dev, uchar rtype, uchar request, short value, short index, c
 	haddr = 0x1500;			// TD list base
 	
 	hwrited = 0x150c0008;				// Setup data is always 8 bytes located 150c.
-	hwrited = 0x00d00000 | (dev<<24) | NEXTARMSEQ();	// d0 = 'setup', control is always EP 0
+	hwrited = 0x00D00001 | (dev<<24);	// D0 = 'setup', control is always EP 0, 01 = ARM DATA0
 	hwrited = 0x00131514;				// <residue/pipe/retry> <start of next TD>
 	hwrite = (rtype) | (request<<8);	// Setup data:  request (MSB), rtype (LSB)
 	hwrite = value;
@@ -335,13 +462,13 @@ int usbctlmsg(uchar dev, uchar rtype, uchar request, short value, short index, c
 		hwrite = 0x152c;				// Default base address for data transfers
 		hwrite = len;
 		hwrite = 0x10 | (dev<<8) | (rtype & 0x80);	// 10 = OUT, 90 = IN (based on rtype)
-		hwrite = NEXTARMSEQ();					// DATA1 phase -- for some reason
+		hwrite = 0x41;					// ARM, DATA1 phase -- setup is DATA0, first data packet is DATA1, next data packet is DATA0, etc. Status is always DATA1
 		hwrited = 0x00131520;			// <residue/pipe/retry> <start of next TD>
 	}
 	
 	hwrited = i;						// Status phase has no data (should be 00, i avoids clr bug)  
 	hwrite = 0x10 | (dev<<8) | (~rtype & 0x80);		// Opposite of rtype (ACK OUTs with IN, INs with OUT)
-	hwrite = NEXTARMSEQ();						// DATA1 phase
+	hwrite = 0x41;						// ARM, STATUS is always DATA1 phase
 	hwrited = 0x00130000;				// <residue/pipe/retry> <end of TD list>
 	
 	if (!(rtype & 0x80))				// We have data to write
@@ -381,20 +508,17 @@ int usbctlmsg(uchar dev, uchar rtype, uchar request, short value, short index, c
 			i = hreadd & 0xc6000010;
 			if (i != 0)
 				return i;
-			NEXTARMSEQ();
 
 			haddr = 0x151a;		// Second TD entry
 			i = hreadd & 0xc6000010;
 			if (i != 0)
 				return i;
-			NEXTARMSEQ();
 			
 			if (olen) {
 				haddr = 0x1526;		// Third TD entry
 				i = hreadd & 0xc6000010;
 				if (i != 0)
 					return i;
-				NEXTARMSEQ();
 				
 				if (rtype & 0x80) {				// We have data to read
 					haddr = 0x152c;
