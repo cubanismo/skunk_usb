@@ -27,11 +27,14 @@ int bulkcmd(uchar opcode, int blocknum, int blockcount, char* buffer, int len);
 
 int bulkin, bulkout, bulkface, bulkdev;
 int seq = 0x00000001;
+int dToggleIn;
+int dToggleOut;
 int zero = 0;
 
 void start() {
 	char buf[2048];
-	int s1, s2, s3, s4;
+	char str[17];
+	int s1, s2, s3, s4, i;
 
 	skunkRESET();
 	skunkNOP();
@@ -40,6 +43,9 @@ void start() {
 	printf("Staring up\r\n");
 	
 	zero = 0;		// Until BSS starts working
+	dToggleIn = 0;
+	dToggleOut = 0;
+	seq = 0x00000001;
 	
 	// General initialization and enumeration
 	inithusb1();
@@ -54,16 +60,45 @@ void start() {
 	printf("bulkcmd returned 0x%08x\r\n", s2);
 	assert(0 == s2);
 
+	s1 = usbctlmsg(bulkdev, 0x21, 0xff, 0, bulkface, null, 0);	// Reset the device
+	assert(0 == s1);	// NAKs?
+	dToggleIn = 0;
+	dToggleOut = 0;
+
 	// Make an INQUIRY
 	s3 = bulkcmd(0x12, 0, 0, buf, 36);
 	printf("bulkcmd returned 0x%08x\r\n", s3);
 	assert(0 == s3);
+	printf("Peripheral Device Type: 0x%02x\n", buf[0] & 0x1f);
+	printf("Removable Media? %s\n", (buf[1] & 0x80) ? "yes" : "no");
+	for (i = 0; i < 8; i++) {
+		str[i] = buf[8 + i];
+	}
+	str[i] = '\0';
+	printf("Vendor ID: %s\n", str);
+	for (i = 0; i < 16; i++) {
+		str[i] = buf[16 + i];
+	}
+	str[i] = '\0';
+	printf("Product ID: %s\n", str);
+	for (i = 0; i < 4; i++) {
+		str[i] = buf[32 + i];
+	}
+	str[i] = '\0';
+	printf("Product Revision Level: %s\n", str);
+
+	s1 = usbctlmsg(bulkdev, 0x21, 0xff, 0, bulkface, null, 0);	// Reset the device
+	assert(0 == s1);	// NAKs?
+	dToggleIn = 0;
+	dToggleOut = 0;
 
 	// Get disk size and block size
 	s4 = bulkcmd(0x25, 0, 0, buf, 8);
 	printf("bulkcmd returned 0x%08x\r\n", s4);
 	assert(0 == s4);
-	
+	printf("Last Logical Block Address: 0x%08x\n", *(unsigned int *)&buf[0]);
+	printf("Block Length in Bytes: 0x%08x\n", *(unsigned int *)&buf[4]);
+
 	printf("Done!\r\n");
 	// There's nowhere for us to return!
 	haddr = 0x4001;
@@ -224,6 +259,9 @@ void inithusb1() {
 			bulkface = p[2];	// Interface number
 			numends = p[4];		// Number of endpoints in this interface
 			isbulk = (0x8 == p[5] && 0x50 == p[7]);	// USB Mass Storage Class + Bulk Only Interface
+			if (isbulk) {
+				printf("Found bulk interface, interface subclass: 0x%02x\n", p[6]);
+			}
 			p += p[0];		// Next descriptor
 			
 			for (k = 0; k < numends; k++) {	// Parse all endpoints
@@ -250,6 +288,61 @@ void inithusb1() {
 	assert(0 == s6);
 }
 
+static int waitBulkTDList(int direction)
+{
+	int i, sie;
+
+	// Wait for the result in SIE1 (but don't wait forever!)
+	haddr = 0x4007;
+	for (i = 100000; i && 0 == (hwrite & 16); i--)	;
+
+	sie = 0xdead0000 | hwrite;
+
+	printf("--bulk sie = 0x%08x, i = %d\r\n", sie, i);
+	haddr = 0x4007;
+
+	i = hwrite;
+	if (i & 1) {		// HPI mailbox
+		haddr = 0x4005;
+		i = hwrite;
+	}
+	haddr = 0x4004;
+	if (i & 32) {
+		haddr = 0x148;	// SIE2msg
+		i = hread;
+	}
+
+	if (i & 16) {
+		haddr = 0x144;	// SIE1msg
+		sie = hread;
+		if (sie == 0x1000) {	// OK so far, check for additional problems
+			haddr = 0x1506;		// First TD entry
+			i = hreadd;
+			printf("--Control = 0x%02x, status = 0x%02x, RetryCnt = 0x%02x, Residue = 0x%02x\r\n",
+					(i >> 16) & 0xff, i >> 24, i & 0x0ff, (i >> 8) & 0xff);
+			haddr = 0x4004;
+			i &= 0xc6000010;
+			if (0x40 == (i>>24)) {
+				// Device NAKed.  Retry
+				return 0xf33df33d;
+			} else if (i != 0) {
+				printf("Wait for Bulk TDList failed: i = 0x%08x\r\n", i);
+				haddr = 0x4004;
+				return i;
+			}
+
+			if (direction) {
+				dToggleIn ^= 1;
+			} else {
+				dToggleOut ^= 1;
+			}
+			return 0;
+		}
+	}
+
+	return sie;
+}
+
 /**
  * Executes a bulk mass storage command on bulkin/bulkout
  * Expects to read len bytes of data unless opcode = SCSI write
@@ -257,168 +350,167 @@ void inithusb1() {
  */
 int bulkcmd(uchar opcode, int blocknum, int blockcount, char* buffer, int len)
 {
-	int i = 0, sie, olen = len, j, retry;
+	int i = 0, sie, retry;
 	int direction = (opcode == 0xff) ? 0x0 : 0x80;	// 0 = write, 0x80 = read
-	haddr = 0x4004;
-	haddr = 0x1500;			// TD list base
+	unsigned short t;
+#define DT(a) (dToggle##a << 2)
 
-	// Build CBW
-	hwrited = 0x150c001f;				// 0x1500: Command data is always 31 bytes located at 150c.
-	hwrited = 0x00100001 | (bulkdev<<24) | (bulkout<<16);	// 0x1504: 10 = OUT, 01 = ARM DATA0
-	hwrited = 0x0013152c;				// 0x1508: <residue/pipe/retry> <start of next TD>
-	hwrited = 0x53554342;				// 0x150c: CBW signature (43425355 in little endian land)
-	hwrited = (seq >> 16)|(seq << 16);	// 0x1510: Command Block Tag (it's a sequence number)
-	seq++;
-	hwrited = len<<16;					// 0x1514: Transfer length (little endian)
-	hwrite = direction;					// 0x1518: Direction + LUN (zero)
-	hwrite = 0xc | (opcode<<8);			// 0x151a: We support the 12-byte USB Bootability SCSI subset
-	hwrited = (blocknum&0xff00) | (blocknum>>16);		// 0x151c: Middle-endian:  MSB=0, LUN=0, 1SB=>>8, 2SB=>>16
-	hwrited = ((blocknum&0xff)<<16) | (blockcount<<8);	// 0x1520: Middle-endian:  Rsv=0, LSB=>>24, LSB, MSB
-	hwrited = zero;						// 0x1524: Reserved fields
-	hwrited = zero;						// 0x1528: Remainder of the CBW (unused with 12 byte commands)
+	haddr = 0x4004;
+
+	retry = 1;
+	for (i = 0; i < 1000 && retry; i++) {
+		retry = 0;
+		haddr = 0x1500;			// TD list base
+
+		// Build CBW
+		hwrited = 0x150c001f;				// 0x1500: Command data is always 31 bytes located at 150c.
+		hwrited = 0x00100001 | (bulkdev<<24) | (bulkout<<16) | DT(Out);	// 0x1504: 10 = OUT, 01 = ARM DATA0
+		hwrited = 0x001b0000;				// 0x1508: <residue/pipe/retry> <end of TD list>
+		hwrited = 0x53554342;				// 0x150c: CBW signature (43425355 in little endian land)
+		hwrited = (seq >> 16)|(seq << 16);	// 0x1510: Command Block Tag (it's a sequence number)
+		seq++;
+		hwrited = len<<16;					// 0x1514: Transfer length (little endian)
+		hwrite = direction;					// 0x1518: Direction + LUN (zero)
+		hwrite = 0xc | (opcode<<8);			// 0x151a: We support the 12-byte USB Bootability SCSI subset
+		switch (opcode) {
+			case 0x28: // Read
+				hwrited = (blocknum&0xff00) | (blocknum>>16);		// 0x151c: Middle-endian:  MSB=0, LUN=0, 1SB=>>8, 2SB=>>16
+				hwrited = ((blocknum&0xff)<<16) | (blockcount<<8);	// 0x1520: Middle-endian:  Rsv=0, LSB=>>24, LSB, MSB
+				hwrited = zero;						// 0x1524: Reserved fields
+				hwrited = zero;						// 0x1528: Remainder of the CBW (unused with 12 byte commands)
+				break;
+			case 0x12: // Inquiry
+				hwrite = 0;		// 0x151c: 2,1: LUN = 0, reserved byte = 0.
+				hwrite = 0x24 << 8;	// 0x151e: 4,3: reserved byte = 0, allocation length = 0x24
+				hwrite = zero;		// 0x1520: 6,5: reserved byte = 0, pad byte = 0
+				hwrite = zero;		// 0x1522: 8,7: pad bytes = 0
+				hwrite = zero;		// 0x1524: 10,9: pad bytes = 0
+				hwrite = zero;		// 0x151e: 12,11: pad bytes = 0
+				break;
+			default:
+				printf("Warning: Unhandled bulkcmd opcode: 0x%02x\n", opcode);
+				haddr = 4004;
+				haddr = 0x151c;
+				/* fall through */
+			case 0x00: // Test unit ready
+				/* fall through */
+			case 0x25:	// Read capacity
+				hwrited = zero;				// 0x151c: LUN = 0, reserved
+				hwrited = zero;				// reserved/pad
+				hwrited = zero;				// reserved/pad
+				hwrited = zero;				// unused.
+				break;
+		}
+
+		hw(0x1b0, 0x1500);					// Execute our new TD
+
+		printf("--Executing CBW\n");
+		haddr = 0x4004;
+
+		sie = waitBulkTDList(0);
+
+		if (sie == 0xf33df33d) {
+			retry = 1;
+		}
+	}
+
+	if (sie != 0) {
+		return sie;
+	}
 	
 	// Build data section (if there is one)
 	if (len) {
-		hwrited = 0x16000000 | len;		// 0x152c: I/O data starts at 1600
-		if (direction)
-			hwrited = 0x00900001 | (bulkdev<<24) | (bulkin<<16); // 90 = IN, 01 = ARM DATA0
-		else
-			hwrited = 0x00100001 | (bulkdev<<24) | (bulkout<<16); // 10 = OUT, 01 = ARM DATA0
-		hwrited = 0x00131538;				// 0x1534: <residue/pipe/retry> <start of next TD>
-	}
-	
-	// Build CSW check
-	hwrited = 0x1544000d;				// 0x152c/1538: Status data is always 13 bytes located at 1544.
-	hwrited = 0x00900001 | (bulkdev<<24) | (bulkin<<16);	// 0x1530/153c: 90 = IN, 01 = ARM DATA0
-	hwrited = 0x00130000;				// 0x1534/1540: <residue/pipe/retry> <end of TD list>
-	
-	hw(0x1b0, 0x1500);					// Execute our new TD
-	
-	retry = 1;
-	for (j = 0; j < 1000 && retry; j++) {
-		retry = 0;
-		// Wait for the result in SIE1 (but don't wait forever!)
-		haddr = 0x4007;
-		for (i = 100000; i && 0 == (hwrite & 16); i--)	;
-	
-		sie = 0xdead0000 | hwrite;
+		retry = 1;
+		for (i = 0; i < 1000 && retry; i++) {
+			retry = 0;
+			haddr = 0x1500;			// TD list base
+			hwrited = 0x16000000 | len;	// 0x1500: I/O data starts at 1600
+			if (direction)
+				hwrited = 0x00900001 | (bulkdev<<24) | (bulkin<<16) | DT(In); // 90 = IN, 01 = ARM DATA0
+			else
+				hwrited = 0x00100001 | (bulkdev<<24) | (bulkout<<16) | DT(Out); // 10 = OUT, 01 = ARM DATA0
+			hwrited = 0x001b0000;		// 0x1508: <residue/pipe/retry> <end of TD list>
 
-		printf("--bulk sie = 0x%08x, i = %d\r\n", sie, i);
-		haddr = 0x4007;
-		
-		i = hwrite;
-		if (i & 1) {		// HPI mailbox
-			haddr = 0x4005;
-			i = hwrite;
-		}
-		haddr = 0x4004;
-		if (i & 32) {
-			haddr = 0x148;	// SIE2msg
-			i = hread;
-		}
-	
-		if (i & 16) {
-			haddr = 0x144;	// SIE1msg
-			sie = hread;
-			if (sie == 0x1000) {	// OK so far, check for additional problems
-				haddr = 0x1506;		// First TD entry
-				i = hreadd & 0xc6000010;
-				if (i != 0) {
-					printf("First bad, i = 0x%08x\r\n", i);
-					haddr = 0x4004;
-					return i;
-				}
-	
-				haddr = 0x1532;		// Second TD entry
-				i = hreadd;
+			hw(0x1b0, 0x1500);					// Execute our new TD
 
-				printf("--Control = 0x%02x, status = 0x%02x, RetryCnt = 0x%02x, Residue = 0x%02x\r\n",
-				(i >> 16) & 0xff, i >> 24, i & 0x0ff, (i >> 8) & 0xff);
-				haddr = 0x4004;
+			printf("--Executing Data IN\n");
+			haddr = 0x4004;
 
-				i &= 0xc6000010;
-				if (0x40 == (i>>24)) {
-					// Build data section (if there is one)
-					haddr = 0x152c;
-					if (len) {
-						hwrited = 0x16000000 | len;		// 0x152c: I/O data starts at 1600
-						if (direction)
-							hwrited = 0x00900001 | (bulkdev<<24) | (bulkin<<16); // 01 = ARM DATA0
-						else
-							hwrited = 0x00100001 | (bulkdev<<24) | (bulkout<<16); // 01 = ARM DATA0
-						hwrited = 0x00131538;			// 0x1534: <residue/pipe/retry> <start of next TD>
-					}
+			sie = waitBulkTDList(direction);
 
-					// Build CSW check
-					hwrited = 0x1544000d;				// Status data is always 13 bytes located at 1544.
-					hwrited = 0x00900001 | (bulkdev<<24) | (bulkin<<16);	// 90 = IN, 01 = ARM DATA0
-					hwrited = 0x00130000;				// <residue/pipe/retry> <end of TD list>
-					
-					hw(0x1b0, 0x152c);					// Execute our new TD
-					retry = 1;
-					printf("--Executing new CSW TD\r\n");
-					haddr = 0x4004;
-					continue;
-				}
-				if (i != 0) {
-					printf("Uhoh, i = 0x%08x\r\n", i);
-					haddr = 0x4004;
-					return i;
-				}
-				
-				if (olen) {
-					haddr = 0x153e;		// Third TD entry
-					i = hreadd & 0xc6000010;
-					if (i != 0) {
-						printf("Uhoh Two, i = 0x%08x\r\n", i);
-						haddr = 0x4004;
-						return i;
-					}
-	/*				
-					if (rtype & 0x80) {				// We have data to read
-						haddr = 0x152c;
-						while (len >= 0) {
-							t = hread;
-							buffer[0] = t;				// Endian swap
-							buffer[1] = t >> 8;
-							buffer += 2;
-							len -= 2;
-						}
-					}
-					*/
-				}
-
-				haddr = 0x1544;
-				i = hreadd;
-				if (i != 0x53555342) {
-					printf("Invalid CSW signature: 0x%08x\n", i);
-					haddr = 0x4004;
-					haddr = 0x1548;
-				}
-				i = hreadd;
-				i = (i << 16) | (i >> 16);
-				if (i != seq - 1) {
-					printf("Invalid CSW tag: 0x%08x\n", i);
-					printf("      Should be: 0x%08x\n", seq - 1);
-					haddr = 0x4004;
-					haddr = 0x154c;
-				}
-				i = hreadd;
-				i = (i >> 16) | (i << 16);
-				if (i != 0) {
-					printf("CSW Residue: 0x%08x\n", i);
-					haddr = 0x4004;
-					haddr = 0x1550;
-				}
-				i = hread;
-				i &= 0xff;
-				if (i != 0) {
-					printf("CSW status indicates failure: %d\n", i);
-				}
-				
-				return i;
+			if (sie == 0xf33df33d) {
+				retry = 1;
 			}
 		}
+
+		if (sie != 0) {
+			return sie;
+		}
+	}
+	
+	retry = 1;
+	for (i = 0; i < 1000 && retry; i++) {
+		retry = 0;
+		haddr = 0x1500;			// TD list base
+
+		// Build CSW check
+		hwrited = 0x1544000d;				// 0x1500: Status data is always 13 bytes located at 1544.
+		hwrited = 0x00900001 | (bulkdev<<24) | (bulkin<<16) | DT(In);	// 0x1508: 90 = IN, 01 = ARM DATA0
+		hwrited = 0x001b0000;				// 0x1508: <residue/pipe/retry> <end of TD list>
+
+		hw(0x1b0, 0x1500);					// Execute our new TD
+
+		printf("--Executing CSW\n");
+		haddr = 0x4004;
+
+		sie = waitBulkTDList(0x80);
+
+		if (sie == 0xf33df33d) {
+			retry = 1;
+		}
+	}
+
+	if (sie != 0) {
+		return sie;
+	}
+
+	if ((direction & 0x80) && len) {				// We have data to read
+		haddr = 0x1600;
+		while (len >= 0) {
+			t = hread;
+			buffer[0] = t;				// Endian swap
+			buffer[1] = t >> 8;
+			buffer += 2;
+			len -= 2;
+		}
+	}
+
+	haddr = 0x1544;
+	i = hreadd;
+	if (i != 0x53555342) {
+		printf("Invalid CSW signature: 0x%08x\n", i);
+		haddr = 0x4004;
+		haddr = 0x1548;
+	}
+	i = hreadd;
+	i = (i << 16) | (i >> 16);
+	if (i != seq - 1) {
+		printf("Invalid CSW tag: 0x%08x\n", i);
+		printf("      Should be: 0x%08x\n", seq - 1);
+		haddr = 0x4004;
+		haddr = 0x154c;
+	}
+	i = hreadd;
+	i = (i >> 16) | (i << 16);
+	if (i != 0) {
+		printf("CSW Residue: 0x%08x\n", i);
+		haddr = 0x4004;
+		haddr = 0x1550;
+	}
+	i = hread;
+	i &= 0xff;
+	if (i != 0) {
+		printf("CSW status indicates failure: %d\n", i);
 	}
 	
 	return sie;		
