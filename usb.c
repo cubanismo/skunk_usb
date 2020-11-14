@@ -1,4 +1,9 @@
-// Test file system access using HPI mode on Jaguar
+// Jaguar/Skunkboard USB mass storage driver
+//
+// Uses the USB functionality in the EZHost BIOS, accessed from the Jaguar
+// using HPI mode on the skunkboard.
+
+#include "usb.h"
 
 #define		haddr		((volatile short*)0xC00000)[0]
 #define		hread		((volatile short*)0xC00000)[0]
@@ -7,7 +12,6 @@
 #define		hwrited		((volatile int*)0x800000)[0]
 #define		hboxw(_x)	{haddr=0x4005; hwrite=(_x); haddr=0x4004;}
 #define		hw(_a, _x)	{haddr=(_a); hwrite=(_x);}
-#define		checkbox()	{haddr=0x4005; result=hread; haddr=0x4004;}
 
 #define 	SIE1msg		0x0144
 #define 	SIE2msg		0x0148
@@ -26,18 +30,14 @@ static const int verbose = 0;	// Set to >= 1 for more verbose printing
 extern int printf(const char *fmt, ...);
 extern int sprintf(char *str, const char *fmt, ...);
 
-static int inithusb1(short port);
+static int inithusb1(USBDev *dev);
 static int run(short* p, short mbox);
-static int usbctlmsg(short port, uchar dev, uchar rtype, uchar request, short value, short index, char* buffer, short len);
-static int bulkcmd(short port, uchar opcode, int blocknum, int blockcount, char* buffer, int len);
+static int usbctlmsg(USBDev *dev, uchar rtype, uchar request, short value, short index, char* buffer, short len);
+static int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffer, int len);
 
-static int bulkin, bulkout, bulkface, bulkdev;
-static int seq = 0x00000001;
-static int dToggleIn;
-static int dToggleOut;
 static int zero = 0;
 
-void initbulkdev(short port)
+void initbulkdev(USBDev *dev, short port)
 {
 	char buf[128];
 	char str[17];
@@ -45,27 +45,29 @@ void initbulkdev(short port)
 
 	zero = 0;		// Until BSS starts working
 
-	dToggleIn = 0;
-	dToggleOut = 0;
-	seq = 0x00000001;
+	dev->port = port;
+	dev->dev = 0;
+	dev->dToggleIn = 0;
+	dev->dToggleOut = 0;
+	dev->seq = 0x00000001;
 	
 	// General initialization and enumeration
-	if (inithusb1(port)) {
+	if (inithusb1(dev)) {
 		assert(!"USB1 Initialization failed");
 	}
 
 	printf("\r\nUSB1 Initialized\r\n\r\n");
 
-	s1 = usbctlmsg(port, bulkdev, 0x21, 0xff, 0, bulkface, null, 0);	// Reset the device
+	s1 = usbctlmsg(dev, 0x21, 0xff, 0, dev->bulkface, null, 0);	// Reset the device
 	assert(0 == s1);	// NAKs?
 
 	// Test unit ready
-	s2 = bulkcmd(port, 0, 0, 0, null, 0);
+	s2 = bulkcmd(dev, 0, 0, 0, null, 0);
 	LOGV("bulkcmd returned 0x%08x\r\n", s2);
 	assert(0 == s2);
 
 	// Make an INQUIRY
-	s3 = bulkcmd(port, 0x12, 0, 0, buf, 36);
+	s3 = bulkcmd(dev, 0x12, 0, 0, buf, 36);
 	LOGV("bulkcmd returned 0x%08x\r\n", s3);
 	assert(0 == s3);
 	printf("Peripheral Device Type: 0x%02x\r\n", buf[0] & 0x1f);
@@ -87,20 +89,22 @@ void initbulkdev(short port)
 	printf("Product Revision Level: %s\r\n", str);
 
 	// Get disk size and block size
-	s4 = bulkcmd(port, 0x25, 0, 0, buf, 8);
+	s4 = bulkcmd(dev, 0x25, 0, 0, buf, 8);
 	LOGV("bulkcmd returned 0x%08x\r\n", s4);
 	assert(0 == s4);
 	printf("Last Logical Block Address: 0x%08x\r\n", *(unsigned int *)&buf[0]);
 	printf("Block Length in Bytes: 0x%08x\r\n", *(unsigned int *)&buf[4]);
 }
 
-void readblock(short port, int blocknum, char *outBuf)
+void readblocks(USBDev *dev, int blocknum, int blockcount, char *outBuf)
 {
 	int res;
 
-	res = bulkcmd(port, 0x28, 0, 1, outBuf, 0x200 /* XXX hard-coded block size */);
+	res = bulkcmd(dev, 0x28, blocknum, blockcount, outBuf,
+				  blockcount * 0x200 /* XXX hard-coded block size */);
 	LOGV("bulkcmd returned 0x%08x\r\n", res);
 	assert(0 == res);
+	haddr = 0x4001;
 }
 
 // Initialize the CY16 for Host USB on SIE1
@@ -140,7 +144,8 @@ static void utf16letoascii(char *out, const char *in, int length)
 }
 
 // This does NOT currently handle Cruzer Mini 1GB correctly...
-static int inithusb1(short port) {
+static int inithusb1(USBDev *dev)
+{
 	int s1, s2, s3, s4, s5, s6, s7;
 	int i, j, k;
 	char test[256], *p = test;
@@ -149,17 +154,18 @@ static int inithusb1(short port) {
 	int numconfigs, numfaces, numends, setconfig;
 	int isbulk=0;
 	char enSupported = 0;
+	uchar devNum;
 	
 	s1=s2=s3=s4=s5=s6=0;
-	bulkin=bulkout=-1;
+	dev->bulkin=dev->bulkout=-1;
 	
 	// Turn on host USB ports (SIE1) 
 	s1 = run(step1, 0xce01);	// Init HUSB on SIE1
 	if (s1 != 0xfed) {
 		return -1;
 	}
-	step2[1] = port;
-	s2 = run(step2, 0xce01); 	// Reset SIE1 port 0
+	step2[1] = dev->port;
+	s2 = run(step2, 0xce01); 	// Reset SIE1 port <dev->port>
 	if (s1 != 0xfed) {
 		return -2;
 	}
@@ -178,28 +184,29 @@ static int inithusb1(short port) {
 	}
 
 	printf("%s-speed device detected on port %d\r\n",
-		   (i & 1) ? "Low" : "Full", port);
+		   (i & 1) ? "Low" : "Full", dev->port);
 
-	bulkdev = 2;
-	s3 = usbctlmsg(port, 0, 0, 5, bulkdev, 0, null, 0);	// Set USB device address to 2
+	devNum = 2;
+	s3 = usbctlmsg(dev, 0, 5, devNum, 0, null, 0);	// Set USB device address to 2
 	assert(0==s3);
-	s4 = usbctlmsg(port, bulkdev, 0x80, 6, 0x100, 0, (char*)test, 18); 	// Read device descriptor
+	dev->dev = devNum;
+	s4 = usbctlmsg(dev, 0x80, 6, 0x100, 0, (char*)test, 18); 	// Read device descriptor
 	assert(0==s4 && 1==test[1]);					// Make sure we got one
 	numconfigs = test[17];
 	
 	if (0 == numconfigs) {		// Yay jumpdrive!  You are so broken...
 		printf("Zero configs?!?\r\n");
 		isbulk = 1;
-		bulkin = 1;
-		bulkout = 1;
+		dev->bulkin = 1;
+		dev->bulkout = 1;
 	}
 
 	// Get string language support
-	s7 = usbctlmsg(port, bulkdev, 0x80, 6, 0x300, 0, (char*)test, 1); 	// Read device string language list size
+	s7 = usbctlmsg(dev, 0x80, 6, 0x300, 0, (char*)test, 1); 	// Read device string language list size
 	if (!s7) {
 		int size = test[0];
 		const unsigned short *words = (const unsigned short *)&test[2];
-		s7 = usbctlmsg(port, bulkdev, 0x80, 6, 0x300, 0, (char*)test, size); 	// Read device string language list
+		s7 = usbctlmsg(dev, 0x80, 6, 0x300, 0, (char*)test, size); 	// Read device string language list
 
 		printf("Language IDs supported:\r\n");
 		for (i = 0; i < (test[0] - 2); i++ ) {
@@ -216,11 +223,11 @@ static int inithusb1(short port) {
 		manufStrIdx = test[14];
 		prodStrIdx = test[15];
 		serialStrIdx = test[16];
-		s7 = usbctlmsg(port, bulkdev, 0x80, 6, 0x300 + manufStrIdx,
+		s7 = usbctlmsg(dev, 0x80, 6, 0x300 + manufStrIdx,
 					   0x904 /* 0x409 byte swapped */, (char*)test, 2);
 		if (!s7) {
 			int size = test[0];
-			s7 = usbctlmsg(port, bulkdev, 0x80, 6, 0x300 + manufStrIdx,
+			s7 = usbctlmsg(dev, 0x80, 6, 0x300 + manufStrIdx,
 						   0x904 /* 0x409 byte swapped */, (char*)test, size);
 			assert(s7 == 0);
 			utf16letoascii(ascii, &test[2], size - 2);
@@ -229,11 +236,11 @@ static int inithusb1(short port) {
 			printf("Failed to query device manufacturer");
 		}
 
-		s7 = usbctlmsg(port, bulkdev, 0x80, 6, 0x300 + prodStrIdx,
+		s7 = usbctlmsg(dev, 0x80, 6, 0x300 + prodStrIdx,
 					   0x904 /* 0x409 byte swapped */, (char*)test, 2);
 		if (!s7) {
 			int size = test[0];
-			s7 = usbctlmsg(port, bulkdev, 0x80, 6, 0x300 + prodStrIdx,
+			s7 = usbctlmsg(dev, 0x80, 6, 0x300 + prodStrIdx,
 						   0x904 /* 0x409 byte swapped */, (char*)test, size);
 			assert(s7 == 0);
 			utf16letoascii(ascii, &test[2], size - 2);
@@ -242,11 +249,11 @@ static int inithusb1(short port) {
 			printf("Failed to query device product name");
 		}
 
-		s7 = usbctlmsg(port, bulkdev, 0x80, 6, 0x300 + serialStrIdx,
+		s7 = usbctlmsg(dev, 0x80, 6, 0x300 + serialStrIdx,
 					   0x904 /* 0x409 byte swapped */, (char*)test, 2);
 		if (!s7) {
 			int size = test[0];
-			s7 = usbctlmsg(port, bulkdev, 0x80, 6, 0x300 + serialStrIdx,
+			s7 = usbctlmsg(dev, 0x80, 6, 0x300 + serialStrIdx,
 						   0x904 /* 0x409 byte swapped */, (char*)test, size);
 			assert(s7 == 0);
 			utf16letoascii(ascii, &test[2], size - 2);
@@ -258,7 +265,7 @@ static int inithusb1(short port) {
 	
 	// Parse all descriptors until we find the bulk interface
 	for (i = 0; i < numconfigs && !isbulk; i++) {
-		s5 = usbctlmsg(port, bulkdev, 0x80, 6, 0x200 + i, 0, (char*)test, 32);	// Read config descriptor
+		s5 = usbctlmsg(dev, 0x80, 6, 0x200 + i, 0, (char*)test, 32);	// Read config descriptor
 		assert(0==s5 && 2==test[1]);							// Make sure we got one
 		
 		p = test;			// Parse config packet
@@ -268,7 +275,7 @@ static int inithusb1(short port) {
 		
 		for (j = 0; j < numfaces && !isbulk; j++) {	// Parse all interfaces
 			assert(4==p[1]);	// Make sure we got one
-			bulkface = p[2];	// Interface number
+			dev->bulkface = p[2];	// Interface number
 			numends = p[4];		// Number of endpoints in this interface
 			isbulk = (0x8 == p[5] && 0x50 == p[7]);	// USB Mass Storage Class + Bulk Only Interface
 			if (isbulk) {
@@ -280,9 +287,9 @@ static int inithusb1(short port) {
 				assert(5==p[1]);	// Make sure we got one
 				if (isbulk && 2==p[3]) {
 					if (0x80 & p[2])
-						bulkin = p[2]&0x7f;
+						dev->bulkin = p[2]&0x7f;
 					else
-						bulkout = p[2]&0x7f;
+						dev->bulkout = p[2]&0x7f;
 					assert(p[4]==64);	// 64 byte packets, right?  Even for 2.0 devices?  ???
 				}
 				p += p[0];	// Next descriptor
@@ -291,18 +298,19 @@ static int inithusb1(short port) {
 	}
 	
 	// Make sure we really got them
-	assert(isbulk && bulkin>0 && bulkout>0);
+	assert(isbulk && dev->bulkin>0 && dev->bulkout>0);
 
-	LOGV("isbulk: %d bulkin: %d bulkout %d\r\n", isbulk, bulkin, bulkout);
+	LOGV("isbulk: %d bulkin: %d bulkout %d\r\n",
+		 isbulk, dev->bulkin, dev->bulkout);
 	
 	// Set our favorite configuration -- we are enumerated baby!
-	s6 = usbctlmsg(port, bulkdev, 0, 9, setconfig, 0, null, 0);
+	s6 = usbctlmsg(dev, 0, 9, setconfig, 0, null, 0);
 	assert(0 == s6);
 
 	return 0;
 }
 
-static int waitbulktdlist(int direction)
+static int waitbulktdlist(USBDev *dev, int direction)
 {
 	int i, sie;
 
@@ -362,9 +370,9 @@ static int waitbulktdlist(int direction)
 			}
 
 			if (direction) {
-				dToggleIn ^= 1;
+				dev->dToggleIn ^= 1;
 			} else {
-				dToggleOut ^= 1;
+				dev->dToggleOut ^= 1;
 			}
 			return 0;
 		}
@@ -378,12 +386,12 @@ static int waitbulktdlist(int direction)
  * Expects to read len bytes of data unless opcode = SCSI write
  * Do not exceed 64KB in len or 16M in blocknum or 256 in blockcount -- these are not decoded properly
  */
-int bulkcmd(short port, uchar opcode, int blocknum, int blockcount, char* buffer, int len)
+int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffer, int len)
 {
 	int i = 0, sie, retry;
 	int direction = (opcode == 0xff) ? 0x0 : 0x80;	// 0 = write, 0x80 = read
 	unsigned short t;
-#define DT(a) (dToggle##a << 6)
+#define DT(a) (dev->dToggle##a << 6)
 
 	haddr = 0x4004;
 
@@ -393,12 +401,12 @@ int bulkcmd(short port, uchar opcode, int blocknum, int blockcount, char* buffer
 		haddr = 0x1500;			// TD list base
 
 		// Build CBW
-		hwrited = 0x150c001f | port << 14;	// 0x1500: Command data is always 31 bytes located at 150c.
-		hwrited = 0x00100001 | (bulkdev<<24) | (bulkout<<16) | DT(Out);	// 0x1504: 10 = OUT, 01 = ARM DATA0
+		hwrited = 0x150c001f | (dev->port<< 14);	// 0x1500: Command data is always 31 bytes located at 150c.
+		hwrited = 0x00100001 | (dev->dev<<24) | (dev->bulkout<<16) | DT(Out);	// 0x1504: 10 = OUT, 01 = ARM DATA0
 		hwrited = 0x001b0000;				// 0x1508: <residue/pipe/retry> <end of TD list>
 		hwrited = 0x53554342;				// 0x150c: CBW signature (43425355 in little endian land)
-		hwrited = (seq >> 16)|(seq << 16);	// 0x1510: Command Block Tag (it's a sequence number)
-		seq++;
+		hwrited = (dev->seq >> 16)|(dev->seq << 16);	// 0x1510: Command Block Tag (it's a sequence number)
+		dev->seq++;
 		hwrited = len<<16;					// 0x1514: Transfer length (little endian)
 		hwrite = direction;					// 0x1518: Direction + LUN (zero)
 		hwrite = 0xc | (opcode<<8);			// 0x151a: We support the 12-byte USB Bootability SCSI subset
@@ -437,7 +445,7 @@ int bulkcmd(short port, uchar opcode, int blocknum, int blockcount, char* buffer
 		LOGV("--Executing CBW\r\n");
 		haddr = 0x4004;
 
-		sie = waitbulktdlist(0);
+		sie = waitbulktdlist(dev, 0);
 
 		if (sie == 0xf33df33d) {
 			retry = 1;
@@ -459,11 +467,11 @@ int bulkcmd(short port, uchar opcode, int blocknum, int blockcount, char* buffer
 			for (i = 0; i < 1000 && retry; i++) {
 				retry = 0;
 				haddr = 0x1500;			// TD list base
-				hwrited = (curMemAddr<<16) | len | port << 14;	// 0x1500
+				hwrited = (curMemAddr<<16) | curChunk | (dev->port<<14);	// 0x1500
 				if (direction)
-					hwrited = 0x00900001 | (bulkdev<<24) | (bulkin<<16) | DT(In); // 90 = IN, 01 = ARM DATA0
+					hwrited = 0x00900001 | (dev->dev<<24) | (dev->bulkin<<16) | DT(In); // 90 = IN, 01 = ARM DATA0
 				else
-					hwrited = 0x00100001 | (bulkdev<<24) | (bulkout<<16) | DT(Out); // 10 = OUT, 01 = ARM DATA0
+					hwrited = 0x00100001 | (dev->dev<<24) | (dev->bulkout<<16) | DT(Out); // 10 = OUT, 01 = ARM DATA0
 				hwrited = 0x001b0000;		// 0x1508: <residue/pipe/retry> <end of TD list>
 
 				hw(0x1b0, 0x1500);					// Execute our new TD
@@ -471,7 +479,7 @@ int bulkcmd(short port, uchar opcode, int blocknum, int blockcount, char* buffer
 				LOGV("--Executing Data %s\r\n", direction ? "IN" : "OUT");
 				haddr = 0x4004;
 
-				sie = waitbulktdlist(direction);
+				sie = waitbulktdlist(dev, direction);
 
 				if (sie == 0xf33df33d) {
 					retry = 1;
@@ -492,8 +500,8 @@ int bulkcmd(short port, uchar opcode, int blocknum, int blockcount, char* buffer
 		haddr = 0x1500;			// TD list base
 
 		// Build CSW check
-		hwrited = 0x1544000d | port << 14;	// 0x1500: Status data is always 13 bytes located at 1544.
-		hwrited = 0x00900001 | (bulkdev<<24) | (bulkin<<16) | DT(In);	// 0x1508: 90 = IN, 01 = ARM DATA0
+		hwrited = 0x1544000d | (dev->port<<14);	// 0x1500: Status data is always 13 bytes located at 1544.
+		hwrited = 0x00900001 | (dev->dev<<24) | (dev->bulkin<<16) | DT(In);	// 0x1508: 90 = IN, 01 = ARM DATA0
 		hwrited = 0x001b0000;				// 0x1508: <residue/pipe/retry> <end of TD list>
 
 		hw(0x1b0, 0x1500);					// Execute our new TD
@@ -501,7 +509,7 @@ int bulkcmd(short port, uchar opcode, int blocknum, int blockcount, char* buffer
 		LOGV("--Executing CSW\r\n");
 		haddr = 0x4004;
 
-		sie = waitbulktdlist(0x80);
+		sie = waitbulktdlist(dev, 0x80);
 
 		if (sie == 0xf33df33d) {
 			retry = 1;
@@ -532,9 +540,9 @@ int bulkcmd(short port, uchar opcode, int blocknum, int blockcount, char* buffer
 	}
 	i = hreadd;
 	i = (i << 16) | (i >> 16);
-	if (i != seq - 1) {
+	if (i != dev->seq - 1) {
 		printf("Invalid CSW tag: 0x%08x\r\n", i);
-		printf("      Should be: 0x%08x\r\n", seq - 1);
+		printf("      Should be: 0x%08x\r\n", dev->seq - 1);
 		haddr = 0x4004;
 		haddr = 0x154c;
 	}
@@ -571,7 +579,7 @@ int bulkcmd(short port, uchar opcode, int blocknum, int blockcount, char* buffer
  *		6 NAK Peripheral returns NAK
  *		7 STALL Peripheral returns STALL
  */
-static int usbctlmsg(short port, uchar dev, uchar rtype, uchar request, short value, short index, char* buffer, short len)
+static int usbctlmsg(USBDev *dev, uchar rtype, uchar request, short value, short index, char* buffer, short len)
 {
 	short t;
 	int i = 0, sie, olen = len;
@@ -580,8 +588,8 @@ static int usbctlmsg(short port, uchar dev, uchar rtype, uchar request, short va
 	haddr = 0x4004;
 	haddr = 0x1500;			// TD list base
 	
-	hwrited = 0x150c0008 | port << 14;	// Setup data is always 8 bytes located 150c.
-	hwrited = 0x00D00001 | (dev<<24);	// D0 = 'setup', control is always EP 0, 01 = ARM DATA0
+	hwrited = 0x150c0008 | (dev->port<<14);	// Setup data is always 8 bytes located 150c.
+	hwrited = 0x00D00001 | (dev->dev<<24);	// D0 = 'setup', control is always EP 0, 01 = ARM DATA0
 	hwrited = 0x00131514;				// <residue/pipe/retry> <start of next TD>
 	hwrite = (rtype) | (request<<8);	// Setup data:  request (MSB), rtype (LSB)
 	hwrite = value;
@@ -590,14 +598,14 @@ static int usbctlmsg(short port, uchar dev, uchar rtype, uchar request, short va
 	
 	if (len) {							// If we have data to move, add a data phase
 		hwrite = 0x152c;				// Default base address for data transfers
-		hwrite = len | port << 14;
-		hwrite = 0x10 | (dev<<8) | (rtype & 0x80);	// 10 = OUT, 90 = IN (based on rtype)
+		hwrite = len | (dev->port<<14);
+		hwrite = 0x10 | (dev->dev<<8) | (rtype & 0x80);	// 10 = OUT, 90 = IN (based on rtype)
 		hwrite = 0x41;					// ARM, DATA1 phase -- setup is DATA0, first data packet is DATA1, next data packet is DATA0, etc. Status is always DATA1
 		hwrited = 0x00131520;			// <residue/pipe/retry> <start of next TD>
 	}
 	
-	hwrited = port << 14;				// Status phase has no data
-	hwrite = 0x10 | (dev<<8) | (~rtype & 0x80);		// Opposite of rtype (ACK OUTs with IN, INs with OUT)
+	hwrited = dev->port<<14;			// Status phase has no data
+	hwrite = 0x10 | (dev->dev<<8) | (~rtype & 0x80);	// Opposite of rtype (ACK OUTs with IN, INs with OUT)
 	hwrite = 0x41;						// ARM, STATUS is always DATA1 phase
 	hwrited = 0x00130000;				// <residue/pipe/retry> <end of TD list>
 	

@@ -1,8 +1,11 @@
+// Test the Skunk USB mass storage driver
 #include "skunk.h"
 #include "usb.h"
 
 extern int printf(const char *fmt, ...);
 extern int sprintf(char *str, const char *fmt, ...);
+
+static USBDev dev;
 
 void start() {
 	char buf[2048];
@@ -11,7 +14,7 @@ void start() {
 	int i, j;
 	unsigned int d;
 	char c;
-	short port = 0;
+	short port = 1;
 
 	skunkRESET();
 	skunkNOP();
@@ -19,10 +22,10 @@ void start() {
 
 	printf("Staring up\r\n\r\n");
 
-	initbulkdev(port);
+	initbulkdev(&dev, port);
 
 	// Time to get down to it. Read in the first logical block of data:
-	readblock(port, 0, buf);
+	readblocks(&dev, 0, 1, buf);
 
 	// Print out the data in "xxd" format
 	printf("Raw data from logical block 0:\r\n");

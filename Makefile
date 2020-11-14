@@ -3,21 +3,30 @@ include $(JAGSDK)/tools/build/jagdefs.mk
 
 CFLAGS += -Wall -fno-builtin
 
-OBJS =	startup.o \
-	testdrv.o \
+COMMONOBJS = startup.o \
 	usb.o \
 	sprintf.o \
 	skunkc.o \
 	util.o
 
-COF = testdrv.cof
+TESTOBJS = testdrv.o skunk.o
+
+DUMPOBJS = usbdump.o skunk.o
+
+OBJS = $(COMMONOBJS) $(TESTOBJS) $(DUMPOBJS)
+
+TESTCOF = testdrv.cof
+DUMPCOF = usbdump.cof
 
 include $(JAGSDK)/jaguar/skunk/skunk.mk
 
-PROGS = $(COF)
+PROGS = $(TESTCOF) $(DUMPCOF)
 
-$(COF): $(OBJS)
-	$(LINK) $(LINKFLAGS) -o $@ $(OBJS)
+$(TESTCOF): $(COMMONOBJS) $(TESTOBJS)
+	$(LINK) $(LINKFLAGS) -o $@ $^
+
+$(DUMPCOF): $(COMMONOBJS) $(DUMPOBJS)
+	$(LINK) $(LINKFLAGS) -o $@ $^
 
 skunkc.o: $(SKUNKDIR)/lib/skunkc.s
 	$(ASM) $(ASMFLAGS) -o $@ $<
