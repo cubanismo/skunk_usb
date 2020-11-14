@@ -4,12 +4,13 @@ include $(JAGSDK)/tools/build/jagdefs.mk
 CFLAGS += -Wall -fno-builtin
 
 OBJS =	startup.o \
+	testdrv.o \
 	usb.o \
 	sprintf.o \
 	skunkc.o \
 	util.o
 
-COF = usb.cof
+COF = testdrv.cof
 
 include $(JAGSDK)/jaguar/skunk/skunk.mk
 

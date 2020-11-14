@@ -26,8 +26,6 @@ static const int verbose = 0;	// Set to >= 1 for more verbose printing
 extern int printf(const char *fmt, ...);
 extern int sprintf(char *str, const char *fmt, ...);
 
-#include "skunk.h"
-
 static int inithusb1(short port);
 static int run(short* p, short mbox);
 static int usbctlmsg(short port, uchar dev, uchar rtype, uchar request, short value, short index, char* buffer, short len);
@@ -39,22 +37,14 @@ static int dToggleIn;
 static int dToggleOut;
 static int zero = 0;
 
-void start() {
-	char buf[2048];
-	char str[100];
-	char *sPtr;
-	int s1, s2, s3, s4, s5, i, j;
-	unsigned int d;
-	char c;
-	short port = 0;
+void initbulkdev(short port)
+{
+	char buf[128];
+	char str[17];
+	int s1, s2, s3, s4, i;
 
-	skunkRESET();
-	skunkNOP();
-	skunkNOP();
-
-	printf("Staring up\r\n\r\n");
-	
 	zero = 0;		// Until BSS starts working
+
 	dToggleIn = 0;
 	dToggleOut = 0;
 	seq = 0x00000001;
@@ -102,48 +92,15 @@ void start() {
 	assert(0 == s4);
 	printf("Last Logical Block Address: 0x%08x\r\n", *(unsigned int *)&buf[0]);
 	printf("Block Length in Bytes: 0x%08x\r\n", *(unsigned int *)&buf[4]);
+}
 
-	// Time to get down to it. Read in the first logical block of data:
-	s5 = bulkcmd(port, 0x28, 0, 1, buf, 0x200 /* XXX hard-coded block size */);
-	LOGV("bulkcmd returned 0x%08x\r\n", s5);
-	assert(0 == s5);
+void readblock(short port, int blocknum, char *outBuf)
+{
+	int res;
 
-	// Print out the data in "xxd" format
-	printf("Raw data from logical block 0:\r\n");
-	for (j = 0; j < ((0x200 + 15) / 16); j++) {
-		// Build up the line in a local string buffer. printf()ing one or two
-		// chars at a time over the skunk connection to the host is too slow.
-		sPtr = str + sprintf(str, "%08x: ", j * 16);
-		for (i = 0; i < 16; i += 2) {
-			if (((j * 16) + i) >= 0x200)
-				break;
-
-			d = (*(unsigned short *)&buf[(j * 16) + i]) & 0xffff;
-			sPtr += sprintf(sPtr, "%04x ", d);
-		}
-
-		sPtr += sprintf(sPtr, " ");
-
-		for (i = 0; i < 16; i++) {
-			if (((j * 16) + i) >= 0x200)
-				break;
-
-			c = buf[(j * 16) + i];
-
-			if (c < 0x20 || c > 0x7e) {
-				sPtr += sprintf(sPtr, ".");
-			} else {
-				sPtr += sprintf(sPtr, "%c", c);
-			}
-		}
-
-		printf("%s\r\n", str);
-	}
-
-	printf("\r\nDone!\r\n");
-	// There's nowhere for us to return!
-	haddr = 0x4001;
-	while (1);
+	res = bulkcmd(port, 0x28, 0, 1, outBuf, 0x200 /* XXX hard-coded block size */);
+	LOGV("bulkcmd returned 0x%08x\r\n", res);
+	assert(0 == res);
 }
 
 // Initialize the CY16 for Host USB on SIE1
