@@ -17,6 +17,7 @@
 #define		assert(_x)	{ if (!(_x)) { printf(#_x "\r\n"); while (1); } } 
 
 extern int printf(const char *fmt, ...);
+extern int sprintf(char *str, const char *fmt, ...);
 
 #include "skunk.h"
 
@@ -33,8 +34,11 @@ int zero = 0;
 
 void start() {
 	char buf[2048];
-	char str[17];
-	int s1, s2, s3, s4, i;
+	char str[100];
+	char *sPtr;
+	int s1, s2, s3, s4, s5, i, j;
+	unsigned int d;
+	char c;
 
 	skunkRESET();
 	skunkNOP();
@@ -88,6 +92,43 @@ void start() {
 	assert(0 == s4);
 	printf("Last Logical Block Address: 0x%08x\n", *(unsigned int *)&buf[0]);
 	printf("Block Length in Bytes: 0x%08x\n", *(unsigned int *)&buf[4]);
+
+	// Time to get down to it. Read in the first logical block of data:
+	s5 = bulkcmd(0x28, 0, 1, buf, 0x200 /* XXX hard-coded block size */);
+	printf("bulkcmd returned 0x%08x\r\n", s5);
+	assert(0 == s5);
+
+	// Print out the data in "xxd" format
+	printf("Raw data from logical block 0:\n");
+	for (j = 0; j < ((0x200 + 15) / 16); j++) {
+		// Build up the line in a local string buffer. printf()ing one or two
+		// chars at a time over the skunk connection to the host is too slow.
+		sPtr = str + sprintf(str, "%08x: ", j * 16);
+		for (i = 0; i < 16; i += 2) {
+			if (((j * 16) + i) >= 0x200)
+				break;
+
+			d = (*(unsigned short *)&buf[(j * 16) + i]) & 0xffff;
+			sPtr += sprintf(sPtr, "%04x ", d);
+		}
+
+		sPtr += sprintf(sPtr, " ");
+
+		for (i = 0; i < 16; i++) {
+			if (((j * 16) + i) >= 0x200)
+				break;
+
+			c = buf[(j * 16) + i];
+
+			if (c < 0x20 || c > 0x7e) {
+				sPtr += sprintf(sPtr, ".");
+			} else {
+				sPtr += sprintf(sPtr, "%c", c);
+			}
+		}
+
+		printf("%s\n", str);
+	}
 
 	printf("Done!\r\n");
 	// There's nowhere for us to return!
@@ -426,31 +467,39 @@ int bulkcmd(uchar opcode, int blocknum, int blockcount, char* buffer, int len)
 	
 	// Build data section (if there is one)
 	if (len) {
-		retry = 1;
-		for (i = 0; i < 1000 && retry; i++) {
-			retry = 0;
-			haddr = 0x1500;			// TD list base
-			hwrited = 0x16000000 | len;	// 0x1500: I/O data starts at 1600
-			if (direction)
-				hwrited = 0x00900001 | (bulkdev<<24) | (bulkin<<16) | DT(In); // 90 = IN, 01 = ARM DATA0
-			else
-				hwrited = 0x00100001 | (bulkdev<<24) | (bulkout<<16) | DT(Out); // 10 = OUT, 01 = ARM DATA0
-			hwrited = 0x001b0000;		// 0x1508: <residue/pipe/retry> <end of TD list>
+		int curMemAddr = 0x1600; // I/O data starts at 1600
+		int remainder = len;
+		int curChunk = 0;
+		while (remainder > 0) {
+			curChunk = (remainder >= 64) ? 64 : remainder;
+			retry = 1;
+			for (i = 0; i < 1000 && retry; i++) {
+				retry = 0;
+				haddr = 0x1500;			// TD list base
+				hwrited = (curMemAddr<<16) | len;	// 0x1500
+				if (direction)
+					hwrited = 0x00900001 | (bulkdev<<24) | (bulkin<<16) | DT(In); // 90 = IN, 01 = ARM DATA0
+				else
+					hwrited = 0x00100001 | (bulkdev<<24) | (bulkout<<16) | DT(Out); // 10 = OUT, 01 = ARM DATA0
+				hwrited = 0x001b0000;		// 0x1508: <residue/pipe/retry> <end of TD list>
 
-			hw(0x1b0, 0x1500);					// Execute our new TD
+				hw(0x1b0, 0x1500);					// Execute our new TD
 
-			printf("--Executing Data IN\n");
-			haddr = 0x4004;
+				printf("--Executing Data IN\n");
+				haddr = 0x4004;
 
-			sie = waitBulkTDList(direction);
+				sie = waitBulkTDList(direction);
 
-			if (sie == 0xf33df33d) {
-				retry = 1;
+				if (sie == 0xf33df33d) {
+					retry = 1;
+				}
 			}
-		}
 
-		if (sie != 0) {
-			return sie;
+			if (sie != 0) {
+				return sie;
+			}
+			remainder -= curChunk;
+			curMemAddr += curChunk;
 		}
 	}
 	
