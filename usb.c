@@ -60,11 +60,6 @@ void start() {
 	printf("bulkcmd returned 0x%08x\r\n", s2);
 	assert(0 == s2);
 
-	s1 = usbctlmsg(bulkdev, 0x21, 0xff, 0, bulkface, null, 0);	// Reset the device
-	assert(0 == s1);	// NAKs?
-	dToggleIn = 0;
-	dToggleOut = 0;
-
 	// Make an INQUIRY
 	s3 = bulkcmd(0x12, 0, 0, buf, 36);
 	printf("bulkcmd returned 0x%08x\r\n", s3);
@@ -86,11 +81,6 @@ void start() {
 	}
 	str[i] = '\0';
 	printf("Product Revision Level: %s\n", str);
-
-	s1 = usbctlmsg(bulkdev, 0x21, 0xff, 0, bulkface, null, 0);	// Reset the device
-	assert(0 == s1);	// NAKs?
-	dToggleIn = 0;
-	dToggleOut = 0;
 
 	// Get disk size and block size
 	s4 = bulkcmd(0x25, 0, 0, buf, 8);
@@ -303,19 +293,35 @@ static int waitBulkTDList(int direction)
 
 	i = hwrite;
 	if (i & 1) {		// HPI mailbox
+		printf("** Got unexpected mailbox\n");
 		haddr = 0x4005;
 		i = hwrite;
+		printf("** Mailbox: 0x%04x\n", i);
 	}
 	haddr = 0x4004;
 	if (i & 32) {
+		printf("** Got unexpected SIE2msg\n");
 		haddr = 0x148;	// SIE2msg
 		i = hread;
+		printf("** Msg: 0x%04x\n", i);
 	}
 
 	if (i & 16) {
 		haddr = 0x144;	// SIE1msg
 		sie = hread;
+		printf("-- SIE1 Message: 0x%04x\n", sie);
+		haddr = 0x4004;
+
 		if (sie == 0x1000) {	// OK so far, check for additional problems
+			haddr = 0x1b6;
+			i = hread;
+			if (i != 1) {
+				printf("** Got Done Message but HUSB_SIE_pTDListDoneSem not set!\n");
+				haddr = 0x4004;
+			}
+			haddr = 0x1b6;
+			hwrite = 0;
+
 			haddr = 0x1506;		// First TD entry
 			i = hreadd;
 			printf("--Control = 0x%02x, status = 0x%02x, RetryCnt = 0x%02x, Residue = 0x%02x\r\n",
@@ -353,7 +359,7 @@ int bulkcmd(uchar opcode, int blocknum, int blockcount, char* buffer, int len)
 	int i = 0, sie, retry;
 	int direction = (opcode == 0xff) ? 0x0 : 0x80;	// 0 = write, 0x80 = read
 	unsigned short t;
-#define DT(a) (dToggle##a << 2)
+#define DT(a) (dToggle##a << 6)
 
 	haddr = 0x4004;
 
