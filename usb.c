@@ -102,7 +102,18 @@ void readblocks(USBDev *dev, int blocknum, int blockcount, char *outBuf)
 
 	res = bulkcmd(dev, 0x28, blocknum, blockcount, outBuf,
 				  blockcount * 0x200 /* XXX hard-coded block size */);
-	LOGV("bulkcmd returned 0x%08x\r\n", res);
+	LOGV("readblocks(): bulkcmd returned 0x%08x\r\n", res);
+	assert(0 == res);
+	haddr = 0x4001;
+}
+
+void writeblocks(USBDev *dev, int blocknum, int blockcount, char *inBuf)
+{
+	int res;
+
+	res = bulkcmd(dev, 0x2a, blocknum, blockcount, inBuf,
+				  blockcount * 0x200 /* XXX hard-coded block size */);
+	LOGV("writeblocks(): bulkcmd returned 0x%08x\r\n", res);
 	assert(0 == res);
 	haddr = 0x4001;
 }
@@ -389,7 +400,8 @@ static int waitbulktdlist(USBDev *dev, int direction)
 int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffer, int len)
 {
 	int i = 0, sie, retry;
-	int direction = (opcode == 0xff) ? 0x0 : 0x80;	// 0 = write, 0x80 = read
+	// 0 = write, 0x80 = read:
+	int direction = (opcode == 0xff || opcode == 0x2a) ? 0x0 : 0x80;
 	unsigned short t;
 #define DT(a) (dev->dToggle##a << 6)
 
@@ -411,6 +423,8 @@ int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffe
 		hwrite = direction;					// 0x1518: Direction + LUN (zero)
 		hwrite = 0xc | (opcode<<8);			// 0x151a: We support the 12-byte USB Bootability SCSI subset
 		switch (opcode) {
+			case 0x2A: // Write
+				/* fall through */
 			case 0x28: // Read
 				hwrited = (blocknum&0xff00) | (blocknum>>16);		// 0x151c: Middle-endian:  MSB=0, LUN=0, 1SB=>>8, 2SB=>>16
 				hwrited = ((blocknum&0xff)<<16) | (blockcount<<8);	// 0x1520: Middle-endian:  Rsv=0, LSB=>>24, LSB, MSB
@@ -455,6 +469,18 @@ int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffe
 	if (sie != 0) {
 		return sie;
 	}
+
+	if (!(direction & 0x80) && len) {	// We have data to write
+		int olen = len;
+		haddr = 0x1600;
+		while (olen >= 0) {
+			t = (unsigned short)(uchar)buffer[0] | (unsigned short)buffer[1] << 8; // Endian swap
+			hwrite = t;
+			buffer += 2;
+			olen -= 2;
+		}
+	}
+
 	
 	// Build data section (if there is one)
 	if (len) {

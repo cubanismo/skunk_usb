@@ -21,5 +21,6 @@ typedef struct USBDevRec {
 
 extern void initbulkdev(USBDev* dev, short port);
 extern void readblocks(USBDev* dev, int blocknum, int blockcount, char *outBuf);
+extern void writeblocks(USBDev *dev, int blocknum, int blockcount, char *inBuf);
 
 #endif /* _USB_H_ */

@@ -7,29 +7,15 @@ extern int sprintf(char *str, const char *fmt, ...);
 
 static USBDev dev;
 
-void start() {
-	char buf[2048];
+static void xxdbuf(const char *buf, int len)
+{
 	char str[100];
 	char *sPtr;
 	int i, j;
 	unsigned int d;
 	char c;
-	short port = 1;
 
-	skunkRESET();
-	skunkNOP();
-	skunkNOP();
-
-	printf("Staring up\r\n\r\n");
-
-	initbulkdev(&dev, port);
-
-	// Time to get down to it. Read in the first logical block of data:
-	readblocks(&dev, 0, 1, buf);
-
-	// Print out the data in "xxd" format
-	printf("Raw data from logical block 0:\r\n");
-	for (j = 0; j < ((0x200 + 15) / 16); j++) {
+	for (j = 0; j < ((len + 15) / 16); j++) {
 		// Build up the line in a local string buffer. printf()ing one or two
 		// chars at a time over the skunk connection to the host is too slow.
 		sPtr = str + sprintf(str, "%08x: ", j * 16);
@@ -58,6 +44,52 @@ void start() {
 
 		printf("%s\r\n", str);
 	}
+}
+
+void fillbuf(char *buf, int len)
+{
+	int i, val = 0;
+
+	for (i = 0; i < len; i++) {
+		buf[i] = val++;
+		if (val > 0xff) val = 0;
+	}
+}
+
+void start() {
+	char inbuf[0x200];
+	char outbuf[0x200];
+	char checkbuf[0x200];
+
+	short port = 0;
+
+	skunkRESET();
+	skunkNOP();
+	skunkNOP();
+
+	printf("Starting up\r\n\r\n");
+
+	initbulkdev(&dev, port);
+
+	// Time to get down to it. Read in the first logical block of data:
+	readblocks(&dev, 0, 1, inbuf);
+
+	// Print out the data in "xxd" format
+	printf("Raw data from logical block 0:\r\n");
+	xxdbuf(inbuf, sizeof(inbuf));
+
+	// Now write some data over the first block
+	fillbuf(outbuf, sizeof(outbuf));
+	writeblocks(&dev, 0, 1, outbuf);
+
+	// Read back what we wrote to check it
+	readblocks(&dev, 0, 1, checkbuf);
+	printf("\r\nData written to logical block 0:\r\n");
+	printf("(Should be 0x00, 0x01, ... 0xfe, 0xff, 0x00, 0x01 ...)\r\n");
+	xxdbuf(checkbuf, sizeof(checkbuf));
+
+	// Restore the original data
+	writeblocks(&dev, 0, 1, inbuf);
 
 	printf("\r\nDone!\r\n");
 	// There's nowhere for us to return!
