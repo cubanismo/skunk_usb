@@ -1,6 +1,23 @@
 #ifndef _USB_H_
 #define _USB_H_
 
+typedef struct TDListRec {
+	struct TDListRec* next;
+
+	unsigned short stAddr;		// Where the HW copy of this struct lives
+
+	unsigned short baseAddr;	// Where the data/payload for this TD lives
+	unsigned short length;
+	unsigned char port;
+	unsigned char endpoint;
+	unsigned char pid;
+	unsigned char devAddr;
+	unsigned char ctrl;
+	unsigned char status;
+	unsigned char retry;
+	unsigned char residue;
+} TDList;
+
 typedef struct USBDevRec {
 	// USB device configuration data
 	short port;

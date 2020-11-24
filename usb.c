@@ -19,6 +19,107 @@
 #define		LCP_R0		0x01c4	// LCP_Rxx registers used as params to interupts
 #define		LCP_R1		0x01c6
 
+/* Convenience defines for TDList members */
+#define PID_SETUP		0xD
+#define PID_IN			0x9
+#define PID_OUT			0x1
+#define PID_SOF			0x5
+#define PID_PREAMBLE	0xC
+#define PID_NAK			0xA
+#define PID_STALL		0xE
+#define PID_DATA0		0x3
+#define PID_DATA1		0xB
+
+#define CTRL_ARM		0x01
+#define CTRL_ISO		0x10
+#define CTRL_SYNSOF		0x20
+#define CTRL_DTOGGLE	0x40
+#define CTRL_PREAMBLE	0x80
+
+#define STATUS_ACK		0x01
+#define STATUS_ERROR	0x02
+#define STATUS_TIMEOUT	0x04
+#define STATUS_SEQ		0x08
+#define STATUS_OVERFLOW	0x20
+#define STATUS_NAK		0x40
+#define STATUS_STALL	0x80
+#define STATUS_ERROR_MASK \
+	(STATUS_ERROR | \
+	 STATUS_TIMEOUT | \
+	 STATUS_OVERFLOW | \
+	 STATUS_NAK | \
+	 STATUS_STALL)
+
+#define TT_CONTROL		0x0
+#define TT_ISO			0x1
+#define TT_BULK			0x2
+#define TT_INTERRUPT	0x3
+
+#define IS_ACTIVE(td) (((td)->retry & 0x10) >> 4)
+#define GET_RETRY_COUNT(td) ((td)->retry & 0x3)
+
+#define INIT_TD(td, start, base, len, dev, _port, ep, _pid, ttype, dt) \
+	do { \
+		(td)->stAddr = (start); \
+		(td)->baseAddr = (base); \
+		(td)->port = (_port); \
+		(td)->length = (len); \
+		(td)->pid = (_pid); \
+		(td)->endpoint = (ep); \
+		(td)->devAddr = (dev); \
+		(td)->ctrl = CTRL_ARM | ((dt) ? CTRL_DTOGGLE : 0); \
+		(td)->status = 0; \
+		(td)->retry = (1<<4) /*active*/ | ((ttype) << 2) | 3; \
+		(td)->residue = 0; \
+		(td)->next = null; \
+	} while (0)
+
+/* Helper macros to encode TDList members to HW format */
+#define MK_PORT_LENGTH(td) (((unsigned short)(td)->port<<14) | (td)->length)
+#define MK_PID_EP(td) (((td)->pid<<4) | (td)->endpoint)
+#define MK_NEXT_TD(td) ((td)->next ? (td)->next->baseAddr : 0x0000)
+#define MK_WORD(hi, lo) (((unsigned char)(hi) << 8) | (lo))
+#define MK_DWORD(hi, lo) (((unsigned int)(lo) << 16) | (hi)) // LE, word-swapped
+
+/*
+ * Write a TDList structure to the EZHost, encoding it to HW form in the
+ * process.
+ */
+static void writeTD(const TDList* td)
+{
+	haddr = td->stAddr;
+
+	hwrited = MK_DWORD(MK_PORT_LENGTH(td), td->baseAddr);
+	hwrited = MK_DWORD(MK_WORD(td->status, td->ctrl),
+					   MK_WORD(td->devAddr, MK_PID_EP(td)));
+	hwrited = MK_DWORD(MK_NEXT_TD(td), MK_WORD(td->residue, td->retry));
+}
+
+/*
+ * Read a TDList structure back from the EZHost, decoding it from HW form in the
+ * process.
+ *
+ * The stAddr field must be initialized when calling this function, and this
+ * function does not touch the next, PID, endpoint, port, length, or base
+ * address fields. The rest of the structure is clobbered.
+ */
+static void readTD(TDList* td)
+{
+	unsigned int tmp;
+	unsigned short w;
+
+	// Don't bother reading port, length, base addr, PID, or endpoint. They
+	// don't change
+	haddr = td->stAddr + 6;
+
+	tmp = hreadd;
+	td->ctrl = (tmp >> 16) & 0xff;
+	td->status = tmp >> 24;
+	w = tmp & 0xffff;
+	td->retry = w & 0xff;
+	td->residue = w >> 8;
+}
+
 static const int verbose = 0;	// Set to >= 1 for more verbose printing
 #define		LOGV(fmt, ...) if (verbose > 0) printf(fmt, ##__VA_ARGS__)
 
@@ -321,7 +422,7 @@ static int inithusb1(USBDev *dev)
 	return 0;
 }
 
-static int waitbulktdlist(USBDev *dev, int direction)
+static int waitbulktdlist(USBDev *dev, TDList *td, int direction)
 {
 	int i, sie;
 
@@ -365,17 +466,18 @@ static int waitbulktdlist(USBDev *dev, int direction)
 			haddr = 0x1b6;
 			hwrite = 0;
 
-			haddr = 0x1506;		// First TD entry
-			i = hreadd;
+			readTD(td);
 			LOGV("--Control = 0x%02x, status = 0x%02x, RetryCnt = 0x%02x, Residue = 0x%02x\r\n",
-					(i >> 16) & 0xff, i >> 24, i & 0x0ff, (i >> 8) & 0xff);
+				 (unsigned)td->ctrl, (unsigned)td->status,
+				 (unsigned)td->retry, (unsigned)td->residue);
 			haddr = 0x4004;
-			i &= 0xc6000010;
-			if (0x40 == (i>>24)) {
+			if ((td->status & STATUS_ERROR_MASK) == STATUS_NAK) {
 				// Device NAKed.  Retry
 				return 0xf33df33d;
-			} else if (i != 0) {
-				printf("Wait for Bulk TDList failed: i = 0x%08x\r\n", i);
+			} else if ((td->status & STATUS_ERROR_MASK) || IS_ACTIVE(td)) {
+				printf("Wait for Bulk TDList failed: Control = 0x%02x, status = 0x%02x, Retry = 0x%02x, Residue = 0x%02x\r\n",
+					   (unsigned)td->ctrl, (unsigned)td->status,
+					   (unsigned)td->retry, (unsigned)td->residue);
 				haddr = 0x4004;
 				return i;
 			}
@@ -399,11 +501,12 @@ static int waitbulktdlist(USBDev *dev, int direction)
  */
 int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffer, int len)
 {
+	TDList td;
 	int i = 0, sie, retry;
 	// 0 = write, 0x80 = read:
 	int direction = (opcode == 0xff || opcode == 0x2a) ? 0x0 : 0x80;
 	unsigned short t;
-#define DT(a) (dev->dToggle##a << 6)
+#define DT(a) (dev->dToggle##a)
 
 	haddr = 0x4004;
 
@@ -412,10 +515,9 @@ int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffe
 		retry = 0;
 		haddr = 0x1500;			// TD list base
 
-		// Build CBW
-		hwrited = 0x150c001f | (dev->port<< 14);	// 0x1500: Command data is always 31 bytes located at 150c.
-		hwrited = 0x00100001 | (dev->dev<<24) | (dev->bulkout<<16) | DT(Out);	// 0x1504: 10 = OUT, 01 = ARM DATA0
-		hwrited = 0x001b0000;				// 0x1508: <residue/pipe/retry> <end of TD list>
+		// Build CBW - TD data is always 31 bytes at 0x150c
+		INIT_TD(&td, 0x1500, 0x150c, 31, dev->dev, dev->port, dev->bulkout, PID_OUT, TT_BULK, DT(Out));
+		writeTD(&td);
 		hwrited = 0x53554342;				// 0x150c: CBW signature (43425355 in little endian land)
 		hwrited = (dev->seq >> 16)|(dev->seq << 16);	// 0x1510: Command Block Tag (it's a sequence number)
 		dev->seq++;
@@ -459,7 +561,7 @@ int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffe
 		LOGV("--Executing CBW\r\n");
 		haddr = 0x4004;
 
-		sie = waitbulktdlist(dev, 0);
+		sie = waitbulktdlist(dev, &td, 0);
 
 		if (sie == 0xf33df33d) {
 			retry = 1;
@@ -484,28 +586,26 @@ int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffe
 	
 	// Build data section (if there is one)
 	if (len) {
-		int curMemAddr = 0x1600; // I/O data starts at 1600
+		unsigned short curMemAddr = 0x1600; // I/O data starts at 1600
 		int remainder = len;
-		int curChunk = 0;
+		unsigned short curChunk = 0;
 		while (remainder > 0) {
 			curChunk = (remainder >= 64) ? 64 : remainder;
 			retry = 1;
 			for (i = 0; i < 1000 && retry; i++) {
 				retry = 0;
-				haddr = 0x1500;			// TD list base
-				hwrited = (curMemAddr<<16) | curChunk | (dev->port<<14);	// 0x1500
-				if (direction)
-					hwrited = 0x00900001 | (dev->dev<<24) | (dev->bulkin<<16) | DT(In); // 90 = IN, 01 = ARM DATA0
-				else
-					hwrited = 0x00100001 | (dev->dev<<24) | (dev->bulkout<<16) | DT(Out); // 10 = OUT, 01 = ARM DATA0
-				hwrited = 0x001b0000;		// 0x1508: <residue/pipe/retry> <end of TD list>
+				INIT_TD(&td, 0x1500, curMemAddr, curChunk, dev->dev, dev->port,
+						direction ? dev->bulkin : dev->bulkout,
+						direction ? PID_IN : PID_OUT, TT_BULK,
+						direction ? DT(In) : DT(Out));
+				writeTD(&td);
 
 				hw(0x1b0, 0x1500);					// Execute our new TD
 
 				LOGV("--Executing Data %s\r\n", direction ? "IN" : "OUT");
 				haddr = 0x4004;
 
-				sie = waitbulktdlist(dev, direction);
+				sie = waitbulktdlist(dev, &td, direction);
 
 				if (sie == 0xf33df33d) {
 					retry = 1;
@@ -523,19 +623,17 @@ int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffe
 	retry = 1;
 	for (i = 0; i < 1000 && retry; i++) {
 		retry = 0;
-		haddr = 0x1500;			// TD list base
-
-		// Build CSW check
-		hwrited = 0x1544000d | (dev->port<<14);	// 0x1500: Status data is always 13 bytes located at 1544.
-		hwrited = 0x00900001 | (dev->dev<<24) | (dev->bulkin<<16) | DT(In);	// 0x1508: 90 = IN, 01 = ARM DATA0
-		hwrited = 0x001b0000;				// 0x1508: <residue/pipe/retry> <end of TD list>
+		// Build CSW - TD data is always 13 bytes at 0x1544
+		INIT_TD(&td, 0x1500, 0x1544, 13, dev->dev, dev->port,
+				dev->bulkin, PID_IN, TT_BULK, DT(In));
+		writeTD(&td);
 
 		hw(0x1b0, 0x1500);					// Execute our new TD
 
 		LOGV("--Executing CSW\r\n");
 		haddr = 0x4004;
 
-		sie = waitbulktdlist(dev, 0x80);
+		sie = waitbulktdlist(dev, &td, 0x80);
 
 		if (sie == 0xf33df33d) {
 			retry = 1;
