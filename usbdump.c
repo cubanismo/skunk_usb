@@ -7,12 +7,13 @@ static USBDev dev;
 void start(void) {
 	char buf[2048];
 	int i;
-	short port = 1;
+	short port = 0;
 
 	skunkRESET();
 	skunkNOP();
 	skunkNOP();
 
+	inithusb();
 	initbulkdev(&dev, port);
 
 	skunkFILEOPEN("usbdump.bin", 0);

@@ -69,6 +69,7 @@ void start() {
 
 	printf("Starting up\r\n\r\n");
 
+	inithusb();
 	initbulkdev(&dev, port);
 
 	// Time to get down to it. Read in the first logical block of data:
@@ -92,6 +93,9 @@ void start() {
 	writeblocks(&dev, 0, 1, inbuf);
 
 	printf("\r\nDone!\r\n");
+
+	skunkCONSOLECLOSE();
+
 	// There's nowhere for us to return!
 	while (1);
 }

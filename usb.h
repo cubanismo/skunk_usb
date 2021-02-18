@@ -36,6 +36,7 @@ typedef struct USBDevRec {
 	int seq;
 } USBDev;
 
+extern int inithusb(void);
 extern void initbulkdev(USBDev* dev, short port);
 extern void readblocks(USBDev* dev, int blocknum, int blockcount, char *outBuf);
 extern void writeblocks(USBDev *dev, int blocknum, int blockcount, char *inBuf);

@@ -131,8 +131,8 @@ static const int verbose = 0;	// Set to >= 1 for more verbose printing
 extern int printf(const char *fmt, ...);
 extern int sprintf(char *str, const char *fmt, ...);
 
-static int inithusb1(USBDev *dev);
-static int run(short* p, short mbox);
+static int initusbdev(USBDev *dev);
+static int run(const short* p, short mbox);
 static int usbctlmsg(USBDev *dev, uchar rtype, uchar request, short value, short index, char* buffer, short len);
 static int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffer, int len);
 
@@ -153,11 +153,11 @@ void initbulkdev(USBDev *dev, short port)
 	dev->seq = 0x00000001;
 	
 	// General initialization and enumeration
-	if (inithusb1(dev)) {
-		assert(!"USB1 Initialization failed");
+	if (initusbdev(dev)) {
+		assert(!"USB Device Initialization failed");
 	}
 
-	printf("\r\nUSB1 Initialized\r\n\r\n");
+	printf("\r\nUSB Device Initialized on port %d\r\n\r\n", port);
 
 	s1 = usbctlmsg(dev, 0x21, 0xff, 0, dev->bulkface, null, 0);	// Reset the device
 	assert(0 == s1);	// NAKs?
@@ -219,25 +219,6 @@ void writeblocks(USBDev *dev, int blocknum, int blockcount, char *inBuf)
 	haddr = 0x4001;
 }
 
-// Initialize the CY16 for Host USB on SIE1
-short step1[] = {
-	SIE1msg,	0,		// Clear SIE1msg
-	//0xc090,	-1,		// Clear USB interrupts - Needs control register access
-	0x1b4,		4800,	// HUSB_pEOT - EOT is 4800 bit times (unlikely)
-	0x142, 		0x440,	// HPI intr routing reg: Don't put anything on HPI pin 
-	//0xc0c8,	0x30,	// Hear about connect change events - Also a control reg
-	LCP_INT,	0x72,	// HUSB_SIE1_INIT_INT - No regs, no return val
-	0, 0				// End sequence.
-};
-
-// Force a RESET on SIE1
-short step2[] = {
-	LCP_R1,		0,		// r1 - Port number (0 = left, 1 = right port on skunk)
-	LCP_R0,		0x3c,	// r0 - Reset duration in milliseconds
-	LCP_INT,	0x74,	// Run HUSB_RESET_INT
-	0, 0				// End sequence. Note: Caller to read return val in r0
-};
-
 // Convert a USB-style 16-bit-word Unicode string to ascii
 static void utf16letoascii(char *out, const char *in, int length)
 {
@@ -255,10 +236,40 @@ static void utf16letoascii(char *out, const char *in, int length)
 	out[i] = '\0';
 }
 
-// This does NOT currently handle Cruzer Mini 1GB correctly...
-static int inithusb1(USBDev *dev)
+int inithusb(void)
 {
-	int s1, s2, s3, s4, s5, s6, s7;
+	int s1;
+
+	// Initialize the CY16 for Host USB on SIE1
+	static const short husb_init[] = {
+		SIE1msg,	0,		// Clear SIE1msg
+		//0xc090,	-1,		// Clear USB interrupts - Needs control register access
+		0x1b4,		4800,	// HUSB_pEOT - EOT is 4800 bit times (unlikely)
+		0x142, 		0x440,	// HPI intr routing reg: Don't put anything on HPI pin
+		//0xc0c8,	0x30,	// Hear about connect change events - Also a control reg
+		LCP_INT,	0x72,	// HUSB_SIE1_INIT_INT - No regs, no return val
+		0, 0				// End sequence.
+	};
+
+	// Turn on host USB ports (SIE1)
+	s1 = run(husb_init, 0xce01);	// Init HUSB on SIE1
+	if (s1 != 0xfed) {
+		return -1;
+	}
+
+	return 0;
+}
+
+static int initusbdev(USBDev *dev)
+{
+	// Force a RESET on SIE1
+	const short port_reset[] = {
+		LCP_R1,	dev->port,	// r1 - Port number (0 = left, 1 = right port on skunk)
+		LCP_R0,	0x3c,		// r0 - Reset duration in milliseconds
+		LCP_INT, 0x74,		// Run HUSB_RESET_INT
+		0, 0				// End sequence. Note: Caller to read return val in r0
+	};
+	int s1, s2, s3, s4, s5, s6;
 	int i, j, k;
 	char test[256], *p = test;
 	char ascii[128];
@@ -267,19 +278,12 @@ static int inithusb1(USBDev *dev)
 	int isbulk=0;
 	char enSupported = 0;
 	uchar devNum;
-	
+
 	s1=s2=s3=s4=s5=s6=0;
 	dev->bulkin=dev->bulkout=-1;
-	
-	// Turn on host USB ports (SIE1) 
-	s1 = run(step1, 0xce01);	// Init HUSB on SIE1
+	s1 = run(port_reset, 0xce01); 	// Reset SIE1 port <dev->port>
 	if (s1 != 0xfed) {
 		return -1;
-	}
-	step2[1] = dev->port;
-	s2 = run(step2, 0xce01); 	// Reset SIE1 port <dev->port>
-	if (s1 != 0xfed) {
-		return -2;
 	}
 
 	// See if a device was found
@@ -288,7 +292,7 @@ static int inithusb1(USBDev *dev)
 
 	if (i & 0x2) {
 		printf("No device connected\r\n");
-		return -3;
+		return -2;
 	} else {
 		// Pause to give the device some time to get ready after reset.
 		// Some devices seem to need this, some don't.
@@ -299,11 +303,11 @@ static int inithusb1(USBDev *dev)
 		   (i & 1) ? "Low" : "Full", dev->port);
 
 	devNum = 2;
-	s3 = usbctlmsg(dev, 0, 5, devNum, 0, null, 0);	// Set USB device address to 2
-	assert(0==s3);
+	s2 = usbctlmsg(dev, 0, 5, devNum, 0, null, 0);	// Set USB device address to 2
+	assert(0==s2);
 	dev->dev = devNum;
-	s4 = usbctlmsg(dev, 0x80, 6, 0x100, 0, (char*)test, 18); 	// Read device descriptor
-	assert(0==s4 && 1==test[1]);					// Make sure we got one
+	s3 = usbctlmsg(dev, 0x80, 6, 0x100, 0, (char*)test, 18); 	// Read device descriptor
+	assert(0==s3 && 1==test[1]);					// Make sure we got one
 	numconfigs = test[17];
 	
 	if (0 == numconfigs) {		// Yay jumpdrive!  You are so broken...
@@ -314,11 +318,11 @@ static int inithusb1(USBDev *dev)
 	}
 
 	// Get string language support
-	s7 = usbctlmsg(dev, 0x80, 6, 0x300, 0, (char*)test, 1); 	// Read device string language list size
-	if (!s7) {
+	s4 = usbctlmsg(dev, 0x80, 6, 0x300, 0, (char*)test, 1); 	// Read device string language list size
+	if (!s4) {
 		int size = test[0];
 		const unsigned short *words = (const unsigned short *)&test[2];
-		s7 = usbctlmsg(dev, 0x80, 6, 0x300, 0, (char*)test, size); 	// Read device string language list
+		s4 = usbctlmsg(dev, 0x80, 6, 0x300, 0, (char*)test, size); 	// Read device string language list
 
 		printf("Language IDs supported:\r\n");
 		for (i = 0; i < (test[0] - 2); i++ ) {
@@ -335,39 +339,39 @@ static int inithusb1(USBDev *dev)
 		manufStrIdx = test[14];
 		prodStrIdx = test[15];
 		serialStrIdx = test[16];
-		s7 = usbctlmsg(dev, 0x80, 6, 0x300 + manufStrIdx,
+		s4 = usbctlmsg(dev, 0x80, 6, 0x300 + manufStrIdx,
 					   0x904 /* 0x409 byte swapped */, (char*)test, 2);
-		if (!s7) {
+		if (!s4) {
 			int size = test[0];
-			s7 = usbctlmsg(dev, 0x80, 6, 0x300 + manufStrIdx,
+			s4 = usbctlmsg(dev, 0x80, 6, 0x300 + manufStrIdx,
 						   0x904 /* 0x409 byte swapped */, (char*)test, size);
-			assert(s7 == 0);
+			assert(s4 == 0);
 			utf16letoascii(ascii, &test[2], size - 2);
 			printf("Device Manufacturer:  %s\r\n", ascii);
 		} else {
 			printf("Failed to query device manufacturer");
 		}
 
-		s7 = usbctlmsg(dev, 0x80, 6, 0x300 + prodStrIdx,
+		s4 = usbctlmsg(dev, 0x80, 6, 0x300 + prodStrIdx,
 					   0x904 /* 0x409 byte swapped */, (char*)test, 2);
-		if (!s7) {
+		if (!s4) {
 			int size = test[0];
-			s7 = usbctlmsg(dev, 0x80, 6, 0x300 + prodStrIdx,
+			s4 = usbctlmsg(dev, 0x80, 6, 0x300 + prodStrIdx,
 						   0x904 /* 0x409 byte swapped */, (char*)test, size);
-			assert(s7 == 0);
+			assert(s4 == 0);
 			utf16letoascii(ascii, &test[2], size - 2);
 			printf("Device Product Name:  %s\r\n", ascii);
 		} else {
 			printf("Failed to query device product name");
 		}
 
-		s7 = usbctlmsg(dev, 0x80, 6, 0x300 + serialStrIdx,
+		s4 = usbctlmsg(dev, 0x80, 6, 0x300 + serialStrIdx,
 					   0x904 /* 0x409 byte swapped */, (char*)test, 2);
-		if (!s7) {
+		if (!s4) {
 			int size = test[0];
-			s7 = usbctlmsg(dev, 0x80, 6, 0x300 + serialStrIdx,
+			s4 = usbctlmsg(dev, 0x80, 6, 0x300 + serialStrIdx,
 						   0x904 /* 0x409 byte swapped */, (char*)test, size);
-			assert(s7 == 0);
+			assert(s4 == 0);
 			utf16letoascii(ascii, &test[2], size - 2);
 			printf("Device Serial Number: %s\r\n", ascii);
 		} else {
@@ -801,7 +805,7 @@ static int usbctlmsg(USBDev *dev, uchar rtype, uchar request, short value, short
 	return sie;		
 }
 
-static int run(short* p, short mbox) {
+static int run(const short* p, short mbox) {
 	int i, mb, sie;
 	
 	haddr = 0x4004;
