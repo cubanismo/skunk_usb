@@ -271,6 +271,7 @@ static int initusbdev(USBDev *dev)
 	};
 	int s1, s2, s3, s4, s5, s6;
 	int i, j, k;
+	int retry;
 	char test[256], *p = test;
 	char ascii[128];
 	int manufStrIdx, prodStrIdx, serialStrIdx;
@@ -306,7 +307,10 @@ static int initusbdev(USBDev *dev)
 	s2 = usbctlmsg(dev, 0, 5, devNum, 0, null, 0);	// Set USB device address to 2
 	assert(0==s2);
 	dev->dev = devNum;
-	s3 = usbctlmsg(dev, 0x80, 6, 0x100, 0, (char*)test, 18); 	// Read device descriptor
+	retry = 0;
+	do {
+		s3 = usbctlmsg(dev, 0x80, 6, 0x100, 0, (char*)test, 18); 	// Read device descriptor
+	} while (((0 != s3) || (1 != test[1])) && (retry++ < 100));
 	assert(0==s3 && 1==test[1]);					// Make sure we got one
 	numconfigs = test[17];
 	
