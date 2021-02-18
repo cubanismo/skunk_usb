@@ -5,6 +5,10 @@
 
 #include "usb.h"
 
+/* From sprintf.c */
+extern int printf(const char *fmt, ...);
+extern int sprintf(char *str, const char *fmt, ...);
+
 #define		haddr		((volatile short*)0xC00000)[0]
 #define		hread		((volatile short*)0xC00000)[0]
 #define		hreadd		((volatile int*)0xC00000)[0]
@@ -13,6 +17,15 @@
 #define		hboxw(_x)	{haddr=0x4005; hwrite=(_x); haddr=0x4004;}
 #define		hw(_a, _x)	{haddr=(_a); hwrite=(_x);}
 
+static const int verbose = 0;	// Set to >= 1 for more verbose printing
+#define		LOGV(fmt, ...) if (verbose > 0) printf(fmt, ##__VA_ARGS__)
+
+#define		null		0
+#define		uchar		unsigned char
+
+#define		assert(_x)	{ if (!(_x)) { printf(#_x "\r\n"); while (1); } }
+
+/* EZHost addresses */
 #define 	SIE1msg		0x0144
 #define 	SIE2msg		0x0148
 #define		LCP_INT		0x01c2
@@ -120,16 +133,210 @@ static void readTD(TDList* td)
 	td->residue = w >> 8;
 }
 
-static const int verbose = 0;	// Set to >= 1 for more verbose printing
-#define		LOGV(fmt, ...) if (verbose > 0) printf(fmt, ##__VA_ARGS__)
+struct EZBlock {
+	/* The first address in this block */
+	short startaddr;
+	/* number of bytes the block owns */
+	short numbytes;
+	char isfree;
 
-#define		null		0
-#define 	uchar		unsigned char
+	/* Active blocks are in a linked list */
+	struct EZBlock *next;
+	struct EZBlock *prev;
+};
 
-#define		assert(_x)	{ if (!(_x)) { printf(#_x "\r\n"); while (1); } } 
+/* EZHost Internal Memory Map, from the EZHost BIOS manual and JCP source:
+ *
+ *  0000 - 04A3 - Interrupt vectors, HW Registers, and USB buffers
+ *  04A4 - 0FEF - Free, reserved for GDB
+ *  0FF0 - 102B - trubow (accelerated USB block copy stub)
+ *  102C - 17FF - Free
+ *  1800 - 37FF - JCP <-> EZHost communications buffers 1 & 2
+ *  3800 - 3FFF - Free
+ *
+ * The EZHeap makes both of the free regions listed above available for use as
+ * USB TDList/data staging memory.
+ */
+#define EZHEAP_REG0_MIN		0x102C
+#define EZHEAP_REG0_SIZE	0x7D4
+#define EZHEAP_REG1_MIN		0x3800
+#define EZHEAP_REG1_SIZE	0x800
+#define EZHEAP_BLOCKS 16 // Must be >= 2
+static struct EZHeap {
+	struct EZBlock blocks[EZHEAP_BLOCKS];
+	struct EZBlock *region0;
+	struct EZBlock *region1;
+} ezheap;
 
-extern int printf(const char *fmt, ...);
-extern int sprintf(char *str, const char *fmt, ...);
+static void init_ezheap(void)
+{
+	short i;
+
+	ezheap.blocks[0].startaddr = EZHEAP_REG0_MIN;
+	ezheap.blocks[0].numbytes = EZHEAP_REG0_SIZE;
+	ezheap.blocks[0].isfree = 1;
+	ezheap.blocks[0].next = &ezheap.blocks[0];
+	ezheap.blocks[0].prev = &ezheap.blocks[0];
+	ezheap.region0 = &ezheap.blocks[0];
+	ezheap.blocks[1].startaddr = EZHEAP_REG1_MIN;
+	ezheap.blocks[1].numbytes = EZHEAP_REG1_SIZE;
+	ezheap.blocks[1].isfree = 1;
+	ezheap.blocks[1].next = &ezheap.blocks[1];
+	ezheap.blocks[1].prev = &ezheap.blocks[1];
+	ezheap.region1 = &ezheap.blocks[1];
+	for (i = 2; i < EZHEAP_BLOCKS; i++) {
+		ezheap.blocks[i].next = ezheap.blocks[i].prev = null;
+	}
+}
+
+#define EZHEAP_ITER_BEGIN(_block) (_block) = ezheap.region0; do {
+#define EZHEAP_ITER_END(_block) \
+	(_block) = (_block)->next; \
+	if ((_block) == ezheap.region0) (_block) = ezheap.region1; \
+	else if ((_block) == ezheap.region1) break; \
+} while (1)
+
+#define EZBLOCK_IS_HEAD(_block) \
+	(((_block) == ezheap.region0) || ((_block) == ezheap.region1))
+
+static void dump_ezheap(void)
+{
+	struct EZBlock *block;
+	int i = 0;
+	LOGV("-- Dumping EZHeap --\r\n");
+	LOGV("region0 = 0x%08x next = 0x%08x prev = 0x%08x\r\n",
+		 ezheap.region0, ezheap.region0->next, ezheap.region0->prev);
+	LOGV("region1 = 0x%08x next = 0x%08x prev = 0x%08x\r\n",
+		 ezheap.region1, ezheap.region1->next, ezheap.region1->prev);
+
+	EZHEAP_ITER_BEGIN(block) {
+		LOGV("  block %d isfree = %s start = 0x%04x bytes = %d\r\n",
+			 i++, block->isfree ? "yes" : "no", block->startaddr,
+			 block->numbytes);
+		LOGV("  block ptr = 0x%08x next = 0x%08x prev = 0x%08x\r\n",
+			 block, block->next, block->prev);
+	} EZHEAP_ITER_END(block);
+
+	LOGV("-- Done Dumping EZHeap --\r\n");
+	haddr = 0x4004;
+}
+
+static struct EZBlock *ezheap_split_block(struct EZBlock *block, short bytes)
+{
+	struct EZBlock *tmp = null;
+	int i;
+
+	assert(bytes < block->numbytes);
+	/* Only free blocks can be split */
+	assert(block->isfree);
+
+	for (i = 0; i < EZHEAP_BLOCKS; i++) {
+		tmp = &ezheap.blocks[i];
+		if (tmp->next == null) {
+			assert(tmp->prev == null);
+
+			tmp->prev = block;
+			tmp->next = block->next;
+			tmp->next->prev = tmp;
+			block->next = tmp;
+
+			tmp->startaddr = block->startaddr + bytes;
+			tmp->numbytes = block->numbytes - bytes;
+			tmp->isfree = block->isfree;
+
+			block->numbytes = bytes;
+
+			return block;
+		}
+	}
+
+	/* No unused blocks available */
+	return null;
+}
+
+static short get_ezheap(short bytes)
+{
+	struct EZBlock *block;
+
+	LOGV("Getting ezheap bytes %d\r\n", bytes);
+
+	/* Round bytes up to the nearest word */
+	bytes = (bytes + 1) & ~1;
+
+	EZHEAP_ITER_BEGIN(block) {
+		if (block->isfree) {
+			if (block->numbytes == bytes) {
+				block->isfree = 0;
+				dump_ezheap();
+				return block->startaddr;
+			} else if (block->numbytes > bytes) {
+				block = ezheap_split_block(block, bytes);
+
+				if (block) {
+					block->isfree = 0;
+					dump_ezheap();
+					return block->startaddr;
+				}
+				/* Else, we're out of unused blocks. Keep looking in case
+				 * there's a free block exactly the size of the request. */
+			}
+		}
+	} EZHEAP_ITER_END(block);
+
+	dump_ezheap();
+	return -1;
+}
+
+static void ezheap_merge_block(struct EZBlock *block)
+{
+	struct EZBlock *tmp = block->next;
+
+	/* Only free blocks can be merged */
+	assert(block->isfree);
+
+	if (tmp->isfree && !EZBLOCK_IS_HEAD(tmp)) {
+		assert(tmp != block);
+		block->numbytes += tmp->numbytes;
+		tmp->prev = null;
+		tmp->next->prev = block;
+		block->next = tmp->next;
+		tmp->next = null;
+	}
+
+	tmp = block->prev;
+	if (tmp->isfree && !EZBLOCK_IS_HEAD(block)) {
+		assert(tmp != block);
+		tmp->numbytes += block->numbytes;
+		block->prev = null;
+		tmp->next = block->next;
+		tmp->next->prev = tmp;
+		block->next = null;
+	}
+}
+
+static void return_ezheap(short addr, short bytes)
+{
+	struct EZBlock *block;
+
+	LOGV("Returning ezheap addr 0x%04x size %d\r\n", addr, bytes);
+
+	EZHEAP_ITER_BEGIN(block) {
+		if (block->startaddr == addr) {
+			assert(!block->isfree);
+			assert(((bytes + 1) & ~1) == block->numbytes);
+
+			block->isfree = 1;
+			ezheap_merge_block(block);
+			dump_ezheap();
+			return;
+		}
+
+		block = block->next;
+	} EZHEAP_ITER_END(block);
+
+	dump_ezheap();
+	assert(!"Unable to return block to EZHeap!");
+}
 
 static int initusbdev(USBDev *dev);
 static int run(const short* p, short mbox);
@@ -256,6 +463,8 @@ int inithusb(void)
 	if (s1 != 0xfed) {
 		return -1;
 	}
+
+	init_ezheap();
 
 	return 0;
 }
@@ -514,57 +723,62 @@ int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffe
 	// 0 = write, 0x80 = read:
 	int direction = (opcode == 0xff || opcode == 0x2a) ? 0x0 : 0x80;
 	unsigned short t;
+	short ezaddr, ezdata;
 #define DT(a) (dev->dToggle##a)
 
 	haddr = 0x4004;
 
+	// Command needs 31 bytes but we'll write 32 since we use word/dword writes.
+	ezaddr = get_ezheap(0xc + 32);
+	assert(ezaddr >= 0);
+
 	retry = 1;
 	for (i = 0; i < 1000 && retry; i++) {
 		retry = 0;
-		haddr = 0x1500;			// TD list base
+		haddr = ezaddr;			// TD list base
 
-		// Build CBW - TD data is always 31 bytes at 0x150c
-		INIT_TD(&td, 0x1500, 0x150c, 31, dev->dev, dev->port, dev->bulkout, PID_OUT, TT_BULK, DT(Out));
+		// Build CBW - TD data is always 31 bytes at ezaddr + 0x0c
+		INIT_TD(&td, ezaddr, ezaddr + 0xc, 31, dev->dev, dev->port, dev->bulkout, PID_OUT, TT_BULK, DT(Out));
 		writeTD(&td);
-		hwrited = 0x53554342;				// 0x150c: CBW signature (43425355 in little endian land)
-		hwrited = (dev->seq >> 16)|(dev->seq << 16);	// 0x1510: Command Block Tag (it's a sequence number)
+		hwrited = 0x53554342;				// ezaddr+0x0c: CBW signature (43425355 in little endian land)
+		hwrited = (dev->seq >> 16)|(dev->seq << 16);	// ezaddr+0x10: Command Block Tag (it's a sequence number)
 		dev->seq++;
-		hwrited = len<<16;					// 0x1514: Transfer length (little endian)
-		hwrite = direction;					// 0x1518: Direction + LUN (zero)
-		hwrite = 0xc | (opcode<<8);			// 0x151a: We support the 12-byte USB Bootability SCSI subset
+		hwrited = len<<16;					// ezaddr+0x14: Transfer length (little endian)
+		hwrite = direction;					// ezaddr+0x18: Direction + LUN (zero)
+		hwrite = 0xc | (opcode<<8);			// ezaddr+0x1a: We support the 12-byte USB Bootability SCSI subset
 		switch (opcode) {
 			case 0x2A: // Write
 				/* fall through */
 			case 0x28: // Read
-				hwrited = (blocknum&0xff00) | (blocknum>>16);		// 0x151c: Middle-endian:  MSB=0, LUN=0, 1SB=>>8, 2SB=>>16
-				hwrited = ((blocknum&0xff)<<16) | (blockcount<<8);	// 0x1520: Middle-endian:  Rsv=0, LSB=>>24, LSB, MSB
-				hwrited = zero;						// 0x1524: Reserved fields
-				hwrited = zero;						// 0x1528: Remainder of the CBW (unused with 12 byte commands)
+				hwrited = (blocknum&0xff00) | (blocknum>>16);		// ezaddr+0x1c: Middle-endian:  MSB=0, LUN=0, 1SB=>>8, 2SB=>>16
+				hwrited = ((blocknum&0xff)<<16) | (blockcount<<8);	// ezaddr+0x20: Middle-endian:  Rsv=0, LSB=>>24, LSB, MSB
+				hwrited = zero;						// ezaddr+0x24: Reserved fields
+				hwrited = zero;						// ezaddr+0x28: Remainder of the CBW (unused with 12 byte commands)
 				break;
 			case 0x12: // Inquiry
-				hwrite = 0;		// 0x151c: 2,1: LUN = 0, reserved byte = 0.
-				hwrite = 0x24 << 8;	// 0x151e: 4,3: reserved byte = 0, allocation length = 0x24
-				hwrite = zero;		// 0x1520: 6,5: reserved byte = 0, pad byte = 0
-				hwrite = zero;		// 0x1522: 8,7: pad bytes = 0
-				hwrite = zero;		// 0x1524: 10,9: pad bytes = 0
-				hwrite = zero;		// 0x151e: 12,11: pad bytes = 0
+				hwrite = 0;		// ezaddr+0x1c: 2,1: LUN = 0, reserved byte = 0.
+				hwrite = 0x24 << 8;	// ezaddr+0x1e: 4,3: reserved byte = 0, allocation length = 0x24
+				hwrite = zero;	// ezaddr+0x20: 6,5: reserved byte = 0, pad byte = 0
+				hwrite = zero;	// ezaddr+0x22: 8,7: pad bytes = 0
+				hwrite = zero;	// ezaddr+0x24: 10,9: pad bytes = 0
+				hwrite = zero;	// ezaddr+0x28: 12,11: pad bytes = 0
 				break;
 			default:
 				printf("Warning: Unhandled bulkcmd opcode: 0x%02x\r\n", opcode);
-				haddr = 4004;
-				haddr = 0x151c;
+				haddr = 0x4004;
+				haddr = ezaddr + 0x1c;
 				/* fall through */
 			case 0x00: // Test unit ready
 				/* fall through */
 			case 0x25:	// Read capacity
-				hwrited = zero;				// 0x151c: LUN = 0, reserved
-				hwrited = zero;				// reserved/pad
-				hwrited = zero;				// reserved/pad
-				hwrited = zero;				// unused.
+				hwrited = zero;	// ezaddr+0x1c: LUN = 0, reserved
+				hwrited = zero;	// reserved/pad
+				hwrited = zero;	// reserved/pad
+				hwrited = zero;	// unused.
 				break;
 		}
 
-		hw(0x1b0, 0x1500);					// Execute our new TD
+		hw(0x1b0, ezaddr);		// Execute our new TD
 
 		LOGV("--Executing CBW\r\n");
 		haddr = 0x4004;
@@ -576,13 +790,22 @@ int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffe
 		}
 	}
 
+	/* Return EZHost memory from CBW transfer */
+	return_ezheap(ezaddr, 0xc + 32);
+
 	if (sie != 0) {
 		return sie;
 	}
 
+	if (len) {
+		/* Get EZHost memory for data */
+		ezdata = get_ezheap(len);
+		assert(ezdata >= 0);
+	}
+
 	if (!(direction & 0x80) && len) {	// We have data to write
 		int olen = len;
-		haddr = 0x1600;
+		haddr = ezdata;
 		while (olen >= 0) {
 			t = (unsigned short)(uchar)buffer[0] | (unsigned short)buffer[1] << 8; // Endian swap
 			hwrite = t;
@@ -591,24 +814,25 @@ int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffe
 		}
 	}
 
-	
 	// Build data section (if there is one)
 	if (len) {
-		unsigned short curMemAddr = 0x1600; // I/O data starts at 1600
+		unsigned short curMemAddr = ezdata;
 		int remainder = len;
 		unsigned short curChunk = 0;
 		while (remainder > 0) {
 			curChunk = (remainder >= 64) ? 64 : remainder;
+			ezaddr = get_ezheap(0xc);
+			assert(ezaddr >= 0);
 			retry = 1;
 			for (i = 0; i < 1000 && retry; i++) {
 				retry = 0;
-				INIT_TD(&td, 0x1500, curMemAddr, curChunk, dev->dev, dev->port,
+				INIT_TD(&td, ezaddr, curMemAddr, curChunk, dev->dev, dev->port,
 						direction ? dev->bulkin : dev->bulkout,
 						direction ? PID_IN : PID_OUT, TT_BULK,
 						direction ? DT(In) : DT(Out));
 				writeTD(&td);
 
-				hw(0x1b0, 0x1500);					// Execute our new TD
+				hw(0x1b0, ezaddr);					// Execute our new TD
 
 				LOGV("--Executing Data %s\r\n", direction ? "IN" : "OUT");
 				haddr = 0x4004;
@@ -620,23 +844,29 @@ int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffe
 				}
 			}
 
+			return_ezheap(ezaddr, 0xc);
+
 			if (sie != 0) {
+				return_ezheap(ezdata, len);
 				return sie;
 			}
 			remainder -= curChunk;
 			curMemAddr += curChunk;
 		}
 	}
-	
+
+	// TD header is 12 bytes, CSW data is 13 bytes
+	ezaddr = get_ezheap(0xc + 13);
+    assert(ezaddr >= 0);
 	retry = 1;
 	for (i = 0; i < 1000 && retry; i++) {
 		retry = 0;
-		// Build CSW - TD data is always 13 bytes at 0x1544
-		INIT_TD(&td, 0x1500, 0x1544, 13, dev->dev, dev->port,
+		// Build CSW - TD data is always 13 bytes
+		INIT_TD(&td, ezaddr, ezaddr+0xc, 13, dev->dev, dev->port,
 				dev->bulkin, PID_IN, TT_BULK, DT(In));
 		writeTD(&td);
 
-		hw(0x1b0, 0x1500);					// Execute our new TD
+		hw(0x1b0, ezaddr);					// Execute our new TD
 
 		LOGV("--Executing CSW\r\n");
 		haddr = 0x4004;
@@ -649,21 +879,30 @@ int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffe
 	}
 
 	if (sie != 0) {
+		if (len) {
+			return_ezheap(ezdata, len);
+		}
+		return_ezheap(ezaddr, 0xc + 13);
 		return sie;
 	}
 
-	if ((direction & 0x80) && len) {	// We have data to read
-		haddr = 0x1600;
-		while (len >= 0) {
-			t = hread;
-			buffer[0] = t;				// Endian swap
-			buffer[1] = t >> 8;
-			buffer += 2;
-			len -= 2;
+	if (len) {
+		if (direction & 0x80) {	// We have data to read
+			int ilen = len;
+			haddr = ezdata;
+			while (ilen >= 0) {
+				t = hread;
+				buffer[0] = t;				// Endian swap
+				buffer[1] = t >> 8;
+				buffer += 2;
+				ilen -= 2;
+			}
 		}
+
+		return_ezheap(ezdata, len);
 	}
 
-	haddr = 0x1544;
+	haddr = ezaddr + 0xc;
 	i = hreadd;
 	if (i != 0x53555342) {
 		printf("Invalid CSW signature: 0x%08x\r\n", i);
@@ -690,6 +929,8 @@ int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffe
 	if (i != 0) {
 		printf("CSW status indicates failure: %d\r\n", i);
 	}
+
+	return_ezheap(ezaddr, 0xc + 13);
 	
 	return sie;		
 }
