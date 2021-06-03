@@ -32,6 +32,9 @@ static const int verbose = 0;	// Set to >= 1 for more verbose printing
 #define		LCP_R0		0x01c4	// LCP_Rxx registers used as params to interupts
 #define		LCP_R1		0x01c6
 
+/* EZHost constants */
+#define		TD_SIZE		0xc
+
 /* Convenience defines for TDList members */
 #define PID_SETUP		0xD
 #define PID_IN			0x9
@@ -90,7 +93,7 @@ static const int verbose = 0;	// Set to >= 1 for more verbose printing
 /* Helper macros to encode TDList members to HW format */
 #define MK_PORT_LENGTH(td) (((unsigned short)(td)->port<<14) | (td)->length)
 #define MK_PID_EP(td) (((td)->pid<<4) | (td)->endpoint)
-#define MK_NEXT_TD(td) ((td)->next ? (td)->next->baseAddr : 0x0000)
+#define MK_NEXT_TD(td) ((td)->next ? (td)->next->stAddr : 0x0000)
 #define MK_WORD(hi, lo) (((unsigned char)(hi) << 8) | (lo))
 #define MK_DWORD(hi, lo) (((unsigned int)(lo) << 16) | (hi)) // LE, word-swapped
 
@@ -106,6 +109,15 @@ static void writeTD(const TDList* td)
 	hwrited = MK_DWORD(MK_WORD(td->status, td->ctrl),
 					   MK_WORD(td->devAddr, MK_PID_EP(td)));
 	hwrited = MK_DWORD(MK_NEXT_TD(td), MK_WORD(td->residue, td->retry));
+}
+
+/* Write a list of TDList structures to the EZHost. */
+static void writeTDList(const TDList* td)
+{
+	while (td) {
+		writeTD(td);
+		td = td->next;
+	}
 }
 
 /*
@@ -956,34 +968,53 @@ int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffe
  */
 static int usbctlmsg(USBDev *dev, uchar rtype, uchar request, short value, short index, char* buffer, short len)
 {
+	TDList tdSetup, tdData, tdStatus;
+	short ezaddr;
 	short t;
 	int i = 0, sie, olen = len;
 	
-	// Construct a TD list for a control message based on the parameters provided
+	// Construct a TD list for a control message
+	// See USB 2.0 spec section 8.5.3, figure 8-37 for details (p. 226)
+
+	ezaddr = 0x1500;        // First TD list entry start address in EZHost RAM
 	haddr = 0x4004;
-	haddr = 0x1500;			// TD list base
-	
-	hwrited = 0x150c0008 | (dev->port<<14);	// Setup data is always 8 bytes located 150c.
-	hwrited = 0x00D00001 | (dev->dev<<24);	// D0 = 'setup', control is always EP 0, 01 = ARM DATA0
-	hwrited = 0x00131514;				// <residue/pipe/retry> <start of next TD>
-	hwrite = (rtype) | (request<<8);	// Setup data:  request (MSB), rtype (LSB)
+
+	// Setup data is always 8 bytes located just after the TD list entry
+	INIT_TD(&tdSetup, ezaddr, ezaddr + TD_SIZE, 8, dev->dev, dev->port, 0,
+			PID_SETUP,
+			TT_CONTROL,
+			0);							// Setup packet is always DATA0
+	tdSetup.next = &tdStatus;
+
+	haddr = ezaddr + TD_SIZE;
+	hwrite = rtype | (request<<8);	// Setup data: request (MSB), rtype (LSB)
 	hwrite = value;
 	hwrite = index;
 	hwrite = len;
-	
-	if (len) {							// If we have data to move, add a data phase
-		hwrite = 0x152c;				// Default base address for data transfers
-		hwrite = len | (dev->port<<14);
-		hwrite = 0x10 | (dev->dev<<8) | (rtype & 0x80);	// 10 = OUT, 90 = IN (based on rtype)
-		hwrite = 0x41;					// ARM, DATA1 phase -- setup is DATA0, first data packet is DATA1, next data packet is DATA0, etc. Status is always DATA1
-		hwrited = 0x00131520;			// <residue/pipe/retry> <start of next TD>
+
+	ezaddr = tdSetup.baseAddr + tdSetup.length;
+
+	if (len) {							// If we have data, add a data phase
+		tdSetup.next = &tdData;
+		INIT_TD(&tdData, ezaddr, 0 /* set later */, len, dev->dev, dev->port, 0,
+				(rtype & 0x80) ? PID_IN : PID_OUT,
+				TT_CONTROL,
+				1);						// First data packet is always DATA1
+		tdData.next = &tdStatus;
+		ezaddr += TD_SIZE;
 	}
-	
-	hwrited = dev->port<<14;			// Status phase has no data
-	hwrite = 0x10 | (dev->dev<<8) | (~rtype & 0x80);	// Opposite of rtype (ACK OUTs with IN, INs with OUT)
-	hwrite = 0x41;						// ARM, STATUS is always DATA1 phase
-	hwrited = 0x00130000;				// <residue/pipe/retry> <end of TD list>
-	
+
+	INIT_TD(&tdStatus, ezaddr, 0x0000, 0, dev->dev, dev->port, 0,
+			// Opposite direction of data packet. No-data messages should always
+			// end up with PID_IN here.
+			(rtype & 0x80) ? PID_OUT : PID_IN,
+			TT_CONTROL,
+			1);							// Status packet is always DATA1
+	ezaddr += TD_SIZE;
+
+	tdData.baseAddr = ezaddr;			// Set tdData data address
+	writeTDList(&tdSetup);				// Write out the entire TD list.
+
 	if (!(rtype & 0x80))				// We have data to write
 		while (len >= 0) {			
 			hwrite = buffer[0] | (buffer[1]<<8);  // Endian swap
@@ -991,8 +1022,8 @@ static int usbctlmsg(USBDev *dev, uchar rtype, uchar request, short value, short
 			len -= 2;
 		}
 
-	hw(0x1b0, 0x1500);					// Execute our new TD
-	
+	hw(0x1b0, tdSetup.stAddr);			// Execute our new TD
+
 	// Wait for the result in SIE1 (but don't wait forever!)
 	haddr = 0x4007;
 	for (i = 100000; i && 0 == (hwrite & 16); i--)	;
@@ -1001,7 +1032,7 @@ static int usbctlmsg(USBDev *dev, uchar rtype, uchar request, short value, short
 
 	LOGV("reading sie, i = %d, sie = 0x%08x\r\n", i, sie);
 	haddr = 0x4007;
-	
+
 	i = hwrite;
 	if (i & 1) {		// HPI mailbox
 		haddr = 0x4005;
@@ -1017,39 +1048,39 @@ static int usbctlmsg(USBDev *dev, uchar rtype, uchar request, short value, short
 		haddr = 0x144;	// SIE1msg
 		sie = hread;
 		if (sie == 0x1000) {	// OK so far, check for additional problems
-			haddr = 0x1506;		// First TD entry
+			haddr = tdSetup.stAddr + 0x6;		// Setup TD entry
 			i = hreadd & 0xc6000010;
 			if (i != 0)
-				return i;
+				return i | 1;
 
-			haddr = 0x151a;		// Second TD entry
+			haddr = tdStatus.stAddr + 0x6;		// Status TD entry
 			i = hreadd & 0xc6000010;
 			if (i != 0)
-				return i;
-			
+				return i | 2;
+
 			if (olen) {
-				haddr = 0x1526;		// Third TD entry
+				haddr = tdData.stAddr + 0x6;	// Data TD entry
 				i = hreadd & 0xc6000010;
 				if (i != 0)
-					return i;
-				
+					return i | 3;
+
 				if (rtype & 0x80) {				// We have data to read
-					haddr = 0x152c;
+					haddr = tdData.baseAddr;
 					while (len >= 0) {
 						t = hread;
-						buffer[0] = t;				// Endian swap
+						buffer[0] = t;			// Endian swap
 						buffer[1] = t >> 8;
 						buffer += 2;
 						len -= 2;
 					}
 				}
 			}
-			
+
 			return 0;
 		}
 	}
-	
-	return sie;		
+
+	return sie;
 }
 
 static int run(const short* p, short mbox) {
