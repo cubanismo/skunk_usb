@@ -639,6 +639,9 @@ static int initusbdev(USBDev *dev)
 	return 0;
 }
 
+#define WAIT_BULK_SUCCESS			0x00000000
+#define WAIT_BULK_RETRY				0xf33df33d
+
 static int waitbulktdlist(USBDev *dev, TDList *td, int direction)
 {
 	int i, sie;
@@ -652,22 +655,21 @@ static int waitbulktdlist(USBDev *dev, TDList *td, int direction)
 	LOGV("--bulk sie = 0x%08x, i = %d\r\n", sie, i);
 	haddr = 0x4007;
 
-	i = hwrite;
-	if (i & 1) {		// HPI mailbox
+	if (sie & 1) {		// HPI mailbox
 		printf("** Got unexpected mailbox\r\n");
 		haddr = 0x4005;
 		i = hwrite;
 		printf("** Mailbox: 0x%04x\r\n", i);
 	}
 	haddr = 0x4004;
-	if (i & 32) {
+	if (sie & 32) {
 		printf("** Got unexpected SIE2msg\r\n");
 		haddr = 0x148;	// SIE2msg
 		i = hread;
 		printf("** Msg: 0x%04x\r\n", i);
 	}
 
-	if (i & 16) {
+	if (sie & 16) {
 		haddr = 0x144;	// SIE1msg
 		sie = hread;
 		LOGV("-- SIE1 Message: 0x%04x\r\n", sie);
@@ -675,8 +677,8 @@ static int waitbulktdlist(USBDev *dev, TDList *td, int direction)
 
 		if (sie == 0x1000) {	// OK so far, check for additional problems
 			haddr = 0x1b6;
-			i = hread;
-			if (i != 1) {
+			sie = hread;
+			if (sie != 1) {
 				printf("** Got Done Message but HUSB_SIE_pTDListDoneSem not set!\r\n");
 				haddr = 0x4004;
 			}
@@ -690,13 +692,13 @@ static int waitbulktdlist(USBDev *dev, TDList *td, int direction)
 			haddr = 0x4004;
 			if ((td->status & STATUS_ERROR_MASK) == STATUS_NAK) {
 				// Device NAKed.  Retry
-				return 0xf33df33d;
+				return WAIT_BULK_RETRY;
 			} else if ((td->status & STATUS_ERROR_MASK) || IS_ACTIVE(td)) {
 				printf("Wait for Bulk TDList failed: Control = 0x%02x, status = 0x%02x, Retry = 0x%02x, Residue = 0x%02x\r\n",
 					   (unsigned)td->ctrl, (unsigned)td->status,
 					   (unsigned)td->retry, (unsigned)td->residue);
 				haddr = 0x4004;
-				return i;
+				return sie;
 			}
 
 			if (direction) {
@@ -704,7 +706,7 @@ static int waitbulktdlist(USBDev *dev, TDList *td, int direction)
 			} else {
 				dev->dToggleOut ^= 1;
 			}
-			return 0;
+			return WAIT_BULK_SUCCESS;
 		}
 	}
 
@@ -785,7 +787,7 @@ int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffe
 
 		sie = waitbulktdlist(dev, &td, 0);
 
-		if (sie == 0xf33df33d) {
+		if (sie == WAIT_BULK_RETRY) {
 			retry = 1;
 		}
 	}
@@ -793,7 +795,7 @@ int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffe
 	/* Return EZHost memory from CBW transfer */
 	return_ezheap(ezaddr, 0xc + 32);
 
-	if (sie != 0) {
+	if (sie != WAIT_BULK_SUCCESS) {
 		return sie;
 	}
 
@@ -839,14 +841,14 @@ int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffe
 
 				sie = waitbulktdlist(dev, &td, direction);
 
-				if (sie == 0xf33df33d) {
+				if (sie == WAIT_BULK_RETRY) {
 					retry = 1;
 				}
 			}
 
 			return_ezheap(ezaddr, 0xc);
 
-			if (sie != 0) {
+			if (sie != WAIT_BULK_SUCCESS) {
 				return_ezheap(ezdata, len);
 				return sie;
 			}
@@ -873,12 +875,12 @@ int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffe
 
 		sie = waitbulktdlist(dev, &td, 0x80);
 
-		if (sie == 0xf33df33d) {
+		if (sie == WAIT_BULK_RETRY) {
 			retry = 1;
 		}
 	}
 
-	if (sie != 0) {
+	if (sie != WAIT_BULK_SUCCESS) {
 		if (len) {
 			return_ezheap(ezdata, len);
 		}
