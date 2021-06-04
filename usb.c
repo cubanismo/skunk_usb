@@ -25,14 +25,53 @@ static const int verbose = 0;	// Set to >= 1 for more verbose printing
 
 #define		assert(_x)	{ if (!(_x)) { printf(#_x "\r\n"); while (1); } }
 
-/* EZHost addresses */
-#define 	SIE1msg		0x0144
-#define 	SIE2msg		0x0148
+/* EZHost register addresses */
+#define		SIE1msg		0x0144
+#define		SIE2msg		0x0148
 #define		LCP_INT		0x01c2
 #define		LCP_R0		0x01c4	// LCP_Rxx registers used as params to interupts
 #define		LCP_R1		0x01c6
 
-/* EZHost constants */
+/* EZHost TD semaphore addresses */
+#define		SIE1_curTD	0x01b0
+#define		SIE2_curTD	0x01b2
+#define		HUSB_EOT	0x01b4
+#define		SIE1_TDdone	0x01b6
+#define		SIE2_TDdone	0x01b8
+
+/* EZHost HPI Status Register Bits */
+#define		HPI_mboxout	0x0001
+#define		HPI_reset1	0x0002
+#define		HPI_done1	0x0004
+#define		HPI_done2	0x0008
+#define		HPI_SIE1msg	0x0010
+#define		HPI_SIE2msg	0x0020
+#define		HPI_resume1	0x0040
+#define		HPI_resume2	0x0080
+#define		HPI_mboxin	0x0100
+#define		HPI_reset2	0x0200
+#define		HPI_sofeop1	0x0400
+//			Reserved	0x0800
+#define		HPI_sofeop2	0x1000
+//			Reserved	0x2000
+#define		HPI_id		0x4000
+#define		HPI_vbus	0x8000
+
+/* EZHost SIE messages */
+#define		SIE_EP0int	0x0001
+#define		SIE_EP1int	0x0002
+#define		SIE_EP2int	0x0004
+#define		SIE_EP3int	0x0008
+#define		SIE_EP4int	0x0010
+#define		SIE_EP5int	0x0020
+#define		SIE_EP6int	0x0040
+#define		SIE_EP7int	0x0080
+#define		SIE_pReset	0x0100
+#define		SIE_pSOF	0x0200
+#define		SIE_pNoSOF	0x0800
+#define		SIE_hDone	0x1000
+
+/* EZHost Misc. Constants */
 #define		TD_SIZE		0xc
 
 /* Convenience defines for TDList members */
@@ -135,6 +174,7 @@ static void readTD(TDList* td)
 
 	// Don't bother reading port, length, base addr, PID, or endpoint. They
 	// don't change
+	haddr = 0x4004;
 	haddr = td->stAddr + 6;
 
 	tmp = hreadd;
@@ -463,7 +503,7 @@ int inithusb(void)
 	static const short husb_init[] = {
 		SIE1msg,	0,		// Clear SIE1msg
 		//0xc090,	-1,		// Clear USB interrupts - Needs control register access
-		0x1b4,		4800,	// HUSB_pEOT - EOT is 4800 bit times (unlikely)
+		HUSB_EOT,	4800,	// EOT is 4800 bit times (unlikely)
 		0x142, 		0x440,	// HPI intr routing reg: Don't put anything on HPI pin
 		//0xc0c8,	0x30,	// Hear about connect change events - Also a control reg
 		LCP_INT,	0x72,	// HUSB_SIE1_INIT_INT - No regs, no return val
@@ -651,78 +691,94 @@ static int initusbdev(USBDev *dev)
 	return 0;
 }
 
+static int waitSIE1done(void)
+{
+	int i = 100000;
+	int status, msg;
+
+	do {
+		haddr = 0x4007;
+		status = 0xdead0000 | hwrite;
+
+		LOGV("polling for SIE1 msg, i = %d, HPI Status: 0x%08x\r\n", i, status);
+
+		if (status & HPI_mboxout) {
+			/* Clear HPI mailbox flag by reading mailbox */
+			haddr = 0x4005;
+			msg = hwrite;
+		}
+
+		haddr = 0x4004;
+		if (status & HPI_SIE2msg) {
+			/* Clear SIE2 message flag by reading message */
+			haddr = SIE2msg;
+			msg = hread;
+		}
+
+		if (status & HPI_SIE1msg) {
+			/* Clear SIE1 message flag by reading message */
+			haddr = SIE1msg;
+			msg = hread;
+			break;
+		}
+
+		msg = 0;
+	} while (i--);
+
+	if (msg & SIE_hDone) {
+		/* Read and clear SIE1 TD done semaphore */
+		haddr = SIE1_TDdone;
+		msg = hread;
+		haddr = SIE1_TDdone;
+		hwrite = 0;
+
+		if (msg != 1) {
+			printf("*** Got Done Message but HUSB_SIE_pTDListDoneSem not set!\r\n");
+			haddr = 0x4004;
+		}
+
+		return 0;
+	} else if (msg) {
+		return msg;
+	}
+
+	return status;
+}
+
 #define WAIT_BULK_SUCCESS			0x00000000
 #define WAIT_BULK_RETRY				0xf33df33d
 
 static int waitbulktdlist(USBDev *dev, TDList *td, int direction)
 {
-	int i, sie;
+	int status = waitSIE1done();
+	if (status)
+		return status;
 
-	// Wait for the result in SIE1 (but don't wait forever!)
-	haddr = 0x4007;
-	for (i = 100000; i && 0 == (hwrite & 16); i--)	;
-
-	sie = 0xdead0000 | hwrite;
-
-	LOGV("--bulk sie = 0x%08x, i = %d\r\n", sie, i);
-	haddr = 0x4007;
-
-	if (sie & 1) {		// HPI mailbox
-		printf("** Got unexpected mailbox\r\n");
-		haddr = 0x4005;
-		i = hwrite;
-		printf("** Mailbox: 0x%04x\r\n", i);
-	}
+	readTD(td);
+	LOGV("--Control=0x%02x Status=0x%02x RetryCn=0x%02x Residue=0x%02x\r\n",
+		 (unsigned)td->ctrl, (unsigned)td->status,
+		 (unsigned)td->retry, (unsigned)td->residue);
 	haddr = 0x4004;
-	if (sie & 32) {
-		printf("** Got unexpected SIE2msg\r\n");
-		haddr = 0x148;	// SIE2msg
-		i = hread;
-		printf("** Msg: 0x%04x\r\n", i);
-	}
 
-	if (sie & 16) {
-		haddr = 0x144;	// SIE1msg
-		sie = hread;
-		LOGV("-- SIE1 Message: 0x%04x\r\n", sie);
+	if ((td->status & STATUS_ERROR_MASK) == STATUS_NAK) {
+		// Device NAKed. Retry.
+		return WAIT_BULK_RETRY;
+	} else if ((td->status & STATUS_ERROR_MASK) || IS_ACTIVE(td)) {
+		printf("Wait for Bulk TDList failed: "
+			   "Control=0x%02x Status=0x%02x Retry=0x%02x Residue=0x%02x\r\n",
+			   (unsigned)td->ctrl, (unsigned)td->status,
+			   (unsigned)td->retry, (unsigned)td->residue);
 		haddr = 0x4004;
-
-		if (sie == 0x1000) {	// OK so far, check for additional problems
-			haddr = 0x1b6;
-			sie = hread;
-			if (sie != 1) {
-				printf("** Got Done Message but HUSB_SIE_pTDListDoneSem not set!\r\n");
-				haddr = 0x4004;
-			}
-			haddr = 0x1b6;
-			hwrite = 0;
-
-			readTD(td);
-			LOGV("--Control = 0x%02x, status = 0x%02x, RetryCnt = 0x%02x, Residue = 0x%02x\r\n",
-				 (unsigned)td->ctrl, (unsigned)td->status,
-				 (unsigned)td->retry, (unsigned)td->residue);
-			haddr = 0x4004;
-			if ((td->status & STATUS_ERROR_MASK) == STATUS_NAK) {
-				// Device NAKed.  Retry
-				return WAIT_BULK_RETRY;
-			} else if ((td->status & STATUS_ERROR_MASK) || IS_ACTIVE(td)) {
-				printf("Wait for Bulk TDList failed: Control = 0x%02x, status = 0x%02x, Retry = 0x%02x, Residue = 0x%02x\r\n",
-					   (unsigned)td->ctrl, (unsigned)td->status,
-					   (unsigned)td->retry, (unsigned)td->residue);
-				haddr = 0x4004;
-				return sie;
-			}
-
-			if (direction) {
-				dev->dToggleIn ^= 1;
-			} else {
-				dev->dToggleOut ^= 1;
-			}
-			return WAIT_BULK_SUCCESS;
-		}
+		return (td->status << 4) | IS_ACTIVE(td);
 	}
 
-	return sie;
+	if (direction) {
+		dev->dToggleIn ^= 1;
+	} else {
+		dev->dToggleOut ^= 1;
+	}
+
+	return WAIT_BULK_SUCCESS;
 }
 
 /**
@@ -792,7 +848,7 @@ int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffe
 				break;
 		}
 
-		hw(0x1b0, ezaddr);		// Execute our new TD
+		hw(SIE1_curTD, ezaddr);	// Execute our new TD
 
 		LOGV("--Executing CBW\r\n");
 		haddr = 0x4004;
@@ -846,7 +902,7 @@ int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffe
 						direction ? DT(In) : DT(Out));
 				writeTD(&td);
 
-				hw(0x1b0, ezaddr);					// Execute our new TD
+				hw(SIE1_curTD, ezaddr);				// Execute our new TD
 
 				LOGV("--Executing Data %s\r\n", direction ? "IN" : "OUT");
 				haddr = 0x4004;
@@ -880,7 +936,7 @@ int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffe
 				dev->bulkin, PID_IN, TT_BULK, DT(In));
 		writeTD(&td);
 
-		hw(0x1b0, ezaddr);					// Execute our new TD
+		hw(SIE1_curTD, ezaddr);				// Execute our new TD
 
 		LOGV("--Executing CSW\r\n");
 		haddr = 0x4004;
@@ -971,7 +1027,7 @@ static int usbctlmsg(USBDev *dev, uchar rtype, uchar request, short value, short
 	TDList tdSetup, tdData, tdStatus;
 	short ezaddr;
 	short t;
-	int i = 0, sie, olen = len;
+	int status, olen = len;
 	
 	// Construct a TD list for a control message
 	// See USB 2.0 spec section 8.5.3, figure 8-37 for details (p. 226)
@@ -1022,65 +1078,71 @@ static int usbctlmsg(USBDev *dev, uchar rtype, uchar request, short value, short
 			len -= 2;
 		}
 
-	hw(0x1b0, tdSetup.stAddr);			// Execute our new TD
+	hw(SIE1_curTD, tdSetup.stAddr);		// Execute our new TD
 
-	// Wait for the result in SIE1 (but don't wait forever!)
-	haddr = 0x4007;
-	for (i = 100000; i && 0 == (hwrite & 16); i--)	;
+	// Wait for the TD list to be done
+	status = waitSIE1done();
+	if (status)
+		return status;
 
-	sie = 0xdead0000 | hwrite;
-
-	LOGV("reading sie, i = %d, sie = 0x%08x\r\n", i, sie);
-	haddr = 0x4007;
-
-	i = hwrite;
-	if (i & 1) {		// HPI mailbox
-		haddr = 0x4005;
-		i = hwrite;
+	readTD(&tdSetup);
+	LOGV("--setup: "
+		 "Control=0x%02x Status=0x%02x RetryCnt=0x%02x Residue=0x%02x\r\n",
+		 (unsigned)tdSetup.ctrl, (unsigned)tdSetup.status,
+		 (unsigned)tdSetup.retry, (unsigned)tdSetup.residue);
+	if ((tdSetup.status & STATUS_ERROR_MASK) || IS_ACTIVE(&tdSetup)) {
+		printf("Control message setup phase failed: "
+			   "Control=0x%02x Status=0x%02x Retry=0x%02x Residue=0x%02x\r\n",
+			   (unsigned)tdSetup.ctrl, (unsigned)tdSetup.status,
+			   (unsigned)tdSetup.retry, (unsigned)tdSetup.residue);
+		haddr = 0x4004;
+		return (tdSetup.status << 4) | 1;
 	}
-	haddr = 0x4004;
-	if (i & 32) {
-		haddr = 0x148;	// SIE2msg
-		i = hread;
+
+	readTD(&tdStatus);
+	LOGV("--status: "
+		 "Control=0x%02x Status=0x%02x RetryCnt=0x%02x Residue=0x%02x\r\n",
+		 (unsigned)tdStatus.ctrl, (unsigned)tdStatus.status,
+		 (unsigned)tdStatus.retry, (unsigned)tdStatus.residue);
+	if ((tdStatus.status & STATUS_ERROR_MASK) || IS_ACTIVE(&tdStatus)) {
+		printf("Control message status phase failed: "
+			   "Control=0x%02x Status=0x%02x Retry=0x%02x Residue=0x%02x\r\n",
+			   (unsigned)tdStatus.ctrl, (unsigned)tdStatus.status,
+			   (unsigned)tdStatus.retry, (unsigned)tdStatus.residue);
+		haddr = 0x4004;
+		return (tdStatus.status << 4) | 2;
 	}
 
-	if (i & 16) {
-		haddr = 0x144;	// SIE1msg
-		sie = hread;
-		if (sie == 0x1000) {	// OK so far, check for additional problems
-			haddr = tdSetup.stAddr + 0x6;		// Setup TD entry
-			i = hreadd & 0xc6000010;
-			if (i != 0)
-				return i | 1;
+	if (!olen)
+		return 0;
 
-			haddr = tdStatus.stAddr + 0x6;		// Status TD entry
-			i = hreadd & 0xc6000010;
-			if (i != 0)
-				return i | 2;
+	readTD(&tdData);
+	LOGV("--data: "
+		 "Control=0x%02x Status=0x%02x RetryCnt=0x%02x Residue=0x%02x\r\n",
+		 (unsigned)tdData.ctrl, (unsigned)tdData.status,
+		 (unsigned)tdData.retry, (unsigned)tdData.residue);
+	if ((tdData.status & STATUS_ERROR_MASK) || IS_ACTIVE(&tdData)) {
+		printf("Control message data phase failed: "
+			   "Control=0x%02x Status=0x%02x Retry=0x%02x Residue=0x%02x\r\n",
+			   (unsigned)tdData.ctrl, (unsigned)tdData.status,
+			   (unsigned)tdData.retry, (unsigned)tdData.residue);
+		haddr = 0x4004;
+		return (tdData.status << 4) | 3;
+	}
 
-			if (olen) {
-				haddr = tdData.stAddr + 0x6;	// Data TD entry
-				i = hreadd & 0xc6000010;
-				if (i != 0)
-					return i | 3;
-
-				if (rtype & 0x80) {				// We have data to read
-					haddr = tdData.baseAddr;
-					while (len >= 0) {
-						t = hread;
-						buffer[0] = t;			// Endian swap
-						buffer[1] = t >> 8;
-						buffer += 2;
-						len -= 2;
-					}
-				}
-			}
-
-			return 0;
+	if (rtype & 0x80) {				// We have data to read
+		haddr = 0x4004;
+		haddr = tdData.baseAddr;
+		while (len >= 0) {
+			t = hread;
+			buffer[0] = t;			// Endian swap
+			buffer[1] = t >> 8;
+			buffer += 2;
+			len -= 2;
 		}
 	}
 
-	return sie;
+	return 0;
 }
 
 static int run(const short* p, short mbox) {
