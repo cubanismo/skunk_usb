@@ -174,15 +174,36 @@ static void readTD(TDList* td)
 
 	// Don't bother reading port, length, base addr, PID, or endpoint. They
 	// don't change
-	haddr = 0x4004;
 	haddr = td->stAddr + 6;
 
 	tmp = hreadd;
-	td->ctrl = (tmp >> 16) & 0xff;
-	td->status = tmp >> 24;
+	w = tmp >> 16;
+	td->ctrl = w & 0xff;
+	td->status = w >> 8;
 	w = tmp & 0xffff;
 	td->retry = w & 0xff;
 	td->residue = w >> 8;
+}
+
+/*
+ * Reset to default and re-send to the EZHost just the fields in a TDList that
+ * the EZHost BIOS changes.
+ *
+ * This is generally used to retry a transaction after a NAK or other
+ * recoverable error.
+ */
+static void resetTD(TDList* td)
+{
+	// Only control, status, retry count, and residue are changed by the EZHost
+	// BIOS. Assume the others are still valid.
+	td->ctrl |= CTRL_ARM;
+	td->status = 0;
+	td->retry |= (1<<4) /*active*/ | 3;
+	td->residue = 0;
+
+	haddr = td->stAddr + 6;
+	hwrited = MK_DWORD(MK_WORD(td->residue, td->retry),
+					   MK_WORD(td->status, td->ctrl));
 }
 
 struct EZBlock {
@@ -802,52 +823,52 @@ int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffe
 	ezaddr = get_ezheap(0xc + 32);
 	assert(ezaddr >= 0);
 
+	haddr = ezaddr;			// TD list base
+
+	// Build CBW - TD data is always 31 bytes at ezaddr + 0x0c
+	INIT_TD(&td, ezaddr, ezaddr + 0xc, 31, dev->dev, dev->port, dev->bulkout, PID_OUT, TT_BULK, DT(Out));
+	writeTD(&td);
+	hwrited = 0x53554342;				// ezaddr+0x0c: CBW signature (43425355 in little endian land)
+	hwrited = (dev->seq >> 16)|(dev->seq << 16);	// ezaddr+0x10: Command Block Tag (it's a sequence number)
+	dev->seq++;
+	hwrited = len<<16;					// ezaddr+0x14: Transfer length (little endian)
+	hwrite = direction;					// ezaddr+0x18: Direction + LUN (zero)
+	hwrite = 0xc | (opcode<<8);			// ezaddr+0x1a: We support the 12-byte USB Bootability SCSI subset
+	switch (opcode) {
+	case 0x2A: // Write
+		/* fall through */
+	case 0x28: // Read
+		hwrited = (blocknum&0xff00) | (blocknum>>16);		// ezaddr+0x1c: Middle-endian:  MSB=0, LUN=0, 1SB=>>8, 2SB=>>16
+		hwrited = ((blocknum&0xff)<<16) | (blockcount<<8);	// ezaddr+0x20: Middle-endian:  Rsv=0, LSB=>>24, LSB, MSB
+		hwrited = zero;					// ezaddr+0x24: Reserved fields
+		hwrited = zero;					// ezaddr+0x28: Remainder of the CBW (unused with 12 byte commands)
+		break;
+	case 0x12: // Inquiry
+		hwrite = 0;		// ezaddr+0x1c: 2,1: LUN = 0, reserved byte = 0.
+		hwrite = 0x24 << 8;	// ezaddr+0x1e: 4,3: reserved byte = 0, allocation length = 0x24
+		hwrite = zero;	// ezaddr+0x20: 6,5: reserved byte = 0, pad byte = 0
+		hwrite = zero;	// ezaddr+0x22: 8,7: pad bytes = 0
+		hwrite = zero;	// ezaddr+0x24: 10,9: pad bytes = 0
+		hwrite = zero;	// ezaddr+0x28: 12,11: pad bytes = 0
+		break;
+	default:
+		printf("Warning: Unhandled bulkcmd opcode: 0x%02x\r\n", opcode);
+		haddr = 0x4004;
+		haddr = ezaddr + 0x1c;
+		/* fall through */
+	case 0x00: // Test unit ready
+		/* fall through */
+	case 0x25:	// Read capacity
+		hwrited = zero;	// ezaddr+0x1c: LUN = 0, reserved
+		hwrited = zero;	// reserved/pad
+		hwrited = zero;	// reserved/pad
+		hwrited = zero;	// unused.
+		break;
+	}
+
 	retry = 1;
 	for (i = 0; i < 1000 && retry; i++) {
 		retry = 0;
-		haddr = ezaddr;			// TD list base
-
-		// Build CBW - TD data is always 31 bytes at ezaddr + 0x0c
-		INIT_TD(&td, ezaddr, ezaddr + 0xc, 31, dev->dev, dev->port, dev->bulkout, PID_OUT, TT_BULK, DT(Out));
-		writeTD(&td);
-		hwrited = 0x53554342;				// ezaddr+0x0c: CBW signature (43425355 in little endian land)
-		hwrited = (dev->seq >> 16)|(dev->seq << 16);	// ezaddr+0x10: Command Block Tag (it's a sequence number)
-		dev->seq++;
-		hwrited = len<<16;					// ezaddr+0x14: Transfer length (little endian)
-		hwrite = direction;					// ezaddr+0x18: Direction + LUN (zero)
-		hwrite = 0xc | (opcode<<8);			// ezaddr+0x1a: We support the 12-byte USB Bootability SCSI subset
-		switch (opcode) {
-			case 0x2A: // Write
-				/* fall through */
-			case 0x28: // Read
-				hwrited = (blocknum&0xff00) | (blocknum>>16);		// ezaddr+0x1c: Middle-endian:  MSB=0, LUN=0, 1SB=>>8, 2SB=>>16
-				hwrited = ((blocknum&0xff)<<16) | (blockcount<<8);	// ezaddr+0x20: Middle-endian:  Rsv=0, LSB=>>24, LSB, MSB
-				hwrited = zero;						// ezaddr+0x24: Reserved fields
-				hwrited = zero;						// ezaddr+0x28: Remainder of the CBW (unused with 12 byte commands)
-				break;
-			case 0x12: // Inquiry
-				hwrite = 0;		// ezaddr+0x1c: 2,1: LUN = 0, reserved byte = 0.
-				hwrite = 0x24 << 8;	// ezaddr+0x1e: 4,3: reserved byte = 0, allocation length = 0x24
-				hwrite = zero;	// ezaddr+0x20: 6,5: reserved byte = 0, pad byte = 0
-				hwrite = zero;	// ezaddr+0x22: 8,7: pad bytes = 0
-				hwrite = zero;	// ezaddr+0x24: 10,9: pad bytes = 0
-				hwrite = zero;	// ezaddr+0x28: 12,11: pad bytes = 0
-				break;
-			default:
-				printf("Warning: Unhandled bulkcmd opcode: 0x%02x\r\n", opcode);
-				haddr = 0x4004;
-				haddr = ezaddr + 0x1c;
-				/* fall through */
-			case 0x00: // Test unit ready
-				/* fall through */
-			case 0x25:	// Read capacity
-				hwrited = zero;	// ezaddr+0x1c: LUN = 0, reserved
-				hwrited = zero;	// reserved/pad
-				hwrited = zero;	// reserved/pad
-				hwrited = zero;	// unused.
-				break;
-		}
-
 		hw(SIE1_curTD, ezaddr);	// Execute our new TD
 
 		LOGV("--Executing CBW\r\n");
@@ -856,6 +877,7 @@ int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffe
 		sie = waitbulktdlist(dev, &td, 0);
 
 		if (sie == WAIT_BULK_RETRY) {
+			resetTD(&td);
 			retry = 1;
 		}
 	}
@@ -894,14 +916,15 @@ int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffe
 			ezaddr = get_ezheap(0xc);
 			assert(ezaddr >= 0);
 			retry = 1;
+
+			INIT_TD(&td, ezaddr, curMemAddr, curChunk, dev->dev, dev->port,
+					direction ? dev->bulkin : dev->bulkout,
+					direction ? PID_IN : PID_OUT, TT_BULK,
+					direction ? DT(In) : DT(Out));
+			writeTD(&td);
+
 			for (i = 0; i < 1000 && retry; i++) {
 				retry = 0;
-				INIT_TD(&td, ezaddr, curMemAddr, curChunk, dev->dev, dev->port,
-						direction ? dev->bulkin : dev->bulkout,
-						direction ? PID_IN : PID_OUT, TT_BULK,
-						direction ? DT(In) : DT(Out));
-				writeTD(&td);
-
 				hw(SIE1_curTD, ezaddr);				// Execute our new TD
 
 				LOGV("--Executing Data %s\r\n", direction ? "IN" : "OUT");
@@ -910,6 +933,7 @@ int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffe
 				sie = waitbulktdlist(dev, &td, direction);
 
 				if (sie == WAIT_BULK_RETRY) {
+					resetTD(&td);
 					retry = 1;
 				}
 			}
@@ -927,14 +951,16 @@ int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffe
 
 	// TD header is 12 bytes, CSW data is 13 bytes
 	ezaddr = get_ezheap(0xc + 13);
-    assert(ezaddr >= 0);
+	assert(ezaddr >= 0);
+
+	// Build CSW - TD data is always 13 bytes
+	INIT_TD(&td, ezaddr, ezaddr+0xc, 13, dev->dev, dev->port,
+			dev->bulkin, PID_IN, TT_BULK, DT(In));
+	writeTD(&td);
+
 	retry = 1;
 	for (i = 0; i < 1000 && retry; i++) {
 		retry = 0;
-		// Build CSW - TD data is always 13 bytes
-		INIT_TD(&td, ezaddr, ezaddr+0xc, 13, dev->dev, dev->port,
-				dev->bulkin, PID_IN, TT_BULK, DT(In));
-		writeTD(&td);
 
 		hw(SIE1_curTD, ezaddr);				// Execute our new TD
 
@@ -944,6 +970,7 @@ int bulkcmd(USBDev *dev, uchar opcode, int blocknum, int blockcount, char* buffe
 		sie = waitbulktdlist(dev, &td, 0x80);
 
 		if (sie == WAIT_BULK_RETRY) {
+			resetTD(&td);
 			retry = 1;
 		}
 	}
@@ -1090,6 +1117,7 @@ static int usbctlmsg(USBDev *dev, uchar rtype, uchar request, short value, short
 		 "Control=0x%02x Status=0x%02x RetryCnt=0x%02x Residue=0x%02x\r\n",
 		 (unsigned)tdSetup.ctrl, (unsigned)tdSetup.status,
 		 (unsigned)tdSetup.retry, (unsigned)tdSetup.residue);
+	haddr = 0x4004;
 	if ((tdSetup.status & STATUS_ERROR_MASK) || IS_ACTIVE(&tdSetup)) {
 		printf("Control message setup phase failed: "
 			   "Control=0x%02x Status=0x%02x Retry=0x%02x Residue=0x%02x\r\n",
@@ -1104,6 +1132,7 @@ static int usbctlmsg(USBDev *dev, uchar rtype, uchar request, short value, short
 		 "Control=0x%02x Status=0x%02x RetryCnt=0x%02x Residue=0x%02x\r\n",
 		 (unsigned)tdStatus.ctrl, (unsigned)tdStatus.status,
 		 (unsigned)tdStatus.retry, (unsigned)tdStatus.residue);
+	haddr = 0x4004;
 	if ((tdStatus.status & STATUS_ERROR_MASK) || IS_ACTIVE(&tdStatus)) {
 		printf("Control message status phase failed: "
 			   "Control=0x%02x Status=0x%02x Retry=0x%02x Residue=0x%02x\r\n",
@@ -1121,6 +1150,7 @@ static int usbctlmsg(USBDev *dev, uchar rtype, uchar request, short value, short
 		 "Control=0x%02x Status=0x%02x RetryCnt=0x%02x Residue=0x%02x\r\n",
 		 (unsigned)tdData.ctrl, (unsigned)tdData.status,
 		 (unsigned)tdData.retry, (unsigned)tdData.residue);
+	haddr = 0x4004;
 	if ((tdData.status & STATUS_ERROR_MASK) || IS_ACTIVE(&tdData)) {
 		printf("Control message data phase failed: "
 			   "Control=0x%02x Status=0x%02x Retry=0x%02x Residue=0x%02x\r\n",
@@ -1131,7 +1161,6 @@ static int usbctlmsg(USBDev *dev, uchar rtype, uchar request, short value, short
 	}
 
 	if (rtype & 0x80) {				// We have data to read
-		haddr = 0x4004;
 		haddr = tdData.baseAddr;
 		while (len >= 0) {
 			t = hread;
