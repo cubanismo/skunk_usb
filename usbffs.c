@@ -1,6 +1,7 @@
 // Skunk USB - FatFS Filesystem Interaction
 #include "skunk.h"
 #include "usb.h"
+#include <string.h>
 #include "sprintf.h"
 #include "ffs/ff.h"
 #include "ffs/diskio.h"
@@ -8,6 +9,12 @@
 #define NUM_DEVS 2
 static USBDev devs[NUM_DEVS];
 static BYTE initialized[NUM_DEVS];
+static char input[1024];
+static char cwd[4096];
+static char path[4096];
+static FATFS fs;
+static DIR dir;
+static FILINFO fi;
 
 DSTATUS disk_initialize(BYTE pdrv)
 {
@@ -83,31 +90,13 @@ static const char *fresToStr(FRESULT fr) {
 #undef CONV
 }
 
-void start(void) {
+static void ls(void) {
 	FRESULT res;
-	FATFS fs;
-	DIR dir;
-	FILINFO fi;
-	int i;
 
-	for (i = 0; i < NUM_DEVS; i++) {
-		initialized[i] = 0;
-	}
-
-	skunkRESET();
-	skunkNOP();
-	skunkNOP();
-
-	res = f_mount(&fs, "0", 1);
-	if (res != FR_OK) {
-		printf("Failed mounting FS: %s\n", fresToStr(res));
-		goto done;
-	}
-
-	res = f_opendir(&dir, "0:/");
+	res = f_opendir(&dir, cwd);
 	if (res != FR_OK) {
 		printf("Failed open dir: %s\n", fresToStr(res));
-		goto done;
+		return;
 	}
 
 	while (1) {
@@ -124,14 +113,100 @@ void start(void) {
 		printf("%s%s\n", fi.fname, (fi.fattrib & AM_DIR) ? "/" : "");
 	}
 
-	skunkCONSOLEWRITE("Read all files in root directory\n");
-
+done:
 	res = f_closedir(&dir);
 	if (res != FR_OK) {
 		printf("Failed to close dir: %s\n", fresToStr(res));
 		goto done;
 	}
+}
 
+static void pwd(void) {
+	printf("%s\n", cwd);
+}
+
+static int cdup(void) {
+	int i;
+	int lastslash = 0;
+	int numslash = 0;
+
+	for (i = 0; cwd[i]; i++) {
+		if (cwd[i] == '/') {
+			lastslash = i;
+			numslash++;
+		}
+		path[i] = cwd[i];
+	}
+	path[i] = '\0';
+
+	if (numslash > 1) {
+		path[lastslash] = '\0';
+		return lastslash;
+	}
+
+	return i;
+}
+
+static void cd(const char *newdir) {
+	FRESULT res;
+	int chars;
+
+	if (!strcmp(newdir, "..")) {
+		chars = cdup();
+	} else {
+		chars = sprintf(path, "%s/%s", cwd, newdir);
+	}
+
+	res = f_opendir(&dir, path);
+	if (res != FR_OK) {
+		printf("Error changing directory to %s: %s\n", newdir, fresToStr(res));
+		return;
+	}
+
+	f_closedir(&dir);
+	memcpy(cwd, path, chars + 1);
+	pwd();
+}
+
+#define DRIVE "0"
+
+void start(void) {
+	FRESULT res;
+	int i;
+
+	for (i = 0; i < NUM_DEVS; i++) {
+		initialized[i] = 0;
+	}
+
+	skunkRESET();
+	skunkNOP();
+	skunkNOP();
+
+	res = f_mount(&fs, DRIVE, 1);
+	if (res != FR_OK) {
+		printf("Failed mounting FS: %s\n", fresToStr(res));
+		goto done;
+	}
+
+	sprintf(cwd, "0:/");
+
+	ls();
+
+	while (1) {
+		memset(input, 0, sizeof(input));
+		skunkCONSOLEREAD(input, sizeof(input) - 1);
+
+		if (!strcmp("ls", input) || !strcmp("dir", input)) {
+			ls();
+		} else if (!strcmp("pwd", input)) {
+			pwd();
+		} else if (input[0] == 'c' && input[1] == 'd') {
+			cd(&input[3]);
+		} else {
+			skunkCONSOLEWRITE("Invalid command\n");
+		}
+	}
 done:
+	f_unmount(DRIVE);
 	skunkCONSOLECLOSE();
 }
