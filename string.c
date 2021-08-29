@@ -40,6 +40,23 @@ int memcmp(const void *s1, const void *s2, size_t n)
 	return 0;
 }
 
+int strcmp(const char *s1, const char *s2)
+{
+    int diff;
+    size_t i = 0;
+
+    while (1) {
+        if (!s1[i] && !s2[i]) {
+            return 0;
+        }
+
+        diff = (int)s1[i] - s2[i];
+        if (diff) return diff;
+
+        i++;
+    }
+}
+
 char *strchr(const char *s, int c)
 {
 	size_t i = 0;
