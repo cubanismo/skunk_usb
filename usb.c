@@ -4,10 +4,7 @@
 // using HPI mode on the skunkboard.
 
 #include "usb.h"
-
-/* From sprintf.c */
-extern int printf(const char *fmt, ...);
-extern int sprintf(char *str, const char *fmt, ...);
+#include "sprintf.h"
 
 #define		haddr		((volatile short*)0xC00000)[0]
 #define		hread		((volatile short*)0xC00000)[0]

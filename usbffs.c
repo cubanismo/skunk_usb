@@ -1,11 +1,9 @@
 // Skunk USB - FatFS Filesystem Interaction
 #include "skunk.h"
 #include "usb.h"
+#include "sprintf.h"
 #include "ffs/ff.h"
 #include "ffs/diskio.h"
-
-// From usb.c
-extern int printf(const char *fmt, ...);
 
 #define NUM_DEVS 2
 static USBDev devs[NUM_DEVS];

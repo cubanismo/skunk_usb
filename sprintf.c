@@ -1,13 +1,8 @@
-#include <stdarg.h>
+#include "sprintf.h"
 
 #if defined(USE_SKUNK)
 #include "skunk.h"
 #endif
-
-#define SPRINTF_MAX 255
-
-int vsprintf(char *buf, const char *fmt, va_list args);
-int sprintf(char *, const char *, ...);
 
 #define isdigit(c) ((c)>='0' && (c)<='9')
 

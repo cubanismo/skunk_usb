@@ -1,9 +1,7 @@
 // Test the Skunk USB mass storage driver
 #include "skunk.h"
 #include "usb.h"
-
-extern int printf(const char *fmt, ...);
-extern int sprintf(char *str, const char *fmt, ...);
+#include "sprintf.h"
 
 static USBDev dev;
 

@@ -2,8 +2,6 @@
 #include "skunk.h"
 #include "usb.h"
 
-extern int printf(const char *fmt, ...);
-
 static USBDev dev0, dev1;
 
 void start(void) {
@@ -50,7 +48,7 @@ void start(void) {
 
 	// XXX I don't know why this is needed, but the following skunkFILEOPEN()
 	// crashes the Jaguar without it.
-	printf("WAR crash opening second file to write\r\n");
+	skunkCONSOLEWRITE("WAR crash opening second file to write\r\n");
 
 	skunkFILEOPEN("usbdump1.bin", 0);
 
