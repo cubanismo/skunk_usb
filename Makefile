@@ -15,7 +15,7 @@ DUMPOBJS = usbdump.o skunk.o
 
 VERIFOBJS = usbverif.o skunk.o
 
-FFSOBJS = ffs/ff.o ffs/ffunicode.o usbffs.o string.o skunk.o
+FFSOBJS = ffs/ff.o ffs/ffunicode.o usbffs.o string.o skunk.o flash.o
 
 OBJS = $(COMMONOBJS) $(TESTOBJS) $(DUMPOBJS) $(FFSOBJS)
 

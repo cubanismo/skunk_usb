@@ -3,18 +3,21 @@
 #include "usb.h"
 #include <string.h>
 #include "sprintf.h"
+#include "flash.h"
 #include "ffs/ff.h"
 #include "ffs/diskio.h"
 
 #define NUM_DEVS 2
 static USBDev devs[NUM_DEVS];
 static BYTE initialized[NUM_DEVS];
-static char input[1024];
 static char cwd[4096];
 static char path[4096];
 static FATFS fs;
 static DIR dir;
 static FILINFO fi;
+static FIL f;
+/* XXX Put this last, or skunkCONSOLEREAD() will clobber cwd now. Why?!? */
+static char input[1024];
 
 DSTATUS disk_initialize(BYTE pdrv)
 {
@@ -85,9 +88,55 @@ static const char *fresToStr(FRESULT fr) {
 		CONV(FR_TOO_MANY_OPEN_FILES);
 		CONV(FR_INVALID_PARAMETER);
 	default:
-		return "<Unkown FRESULT code>";
+		return "<Unknown FRESULT code>";
 	}
 #undef CONV
+}
+
+static long read_file(void *priv, char *buf, unsigned int bytes)
+{
+	FIL* fp = priv;
+	FRESULT res;
+
+	res = f_read(fp, buf, bytes, &bytes);
+
+	if (res != FR_OK) {
+		printf("Error reading from file: %s\n", fresToStr(res));
+		return -1;
+	}
+
+	/* Temporary: useful to track progress when debugging */
+	printf("Read %u of %u bytes from ROM file\n", f_tell(fp), f_size(fp));
+
+	return bytes;
+}
+
+static void flash(const char *file) {
+	FRESULT res;
+
+	sprintf(path, "%s/%s", cwd, file);
+
+	res = f_open(&f, path, FA_READ);
+
+	if (res != FR_OK) {
+		printf("Error opening ROM file '%s': %s\n", path, fresToStr(res));
+		return;
+	}
+
+	/* Skip ROM header */
+	res = f_lseek(&f, 0x2000);
+
+	if (res != FR_OK || f_tell(&f) != 0x2000) {
+		printf("Error seeking past ROM header: %s\n", fresToStr(res));
+		f_close(&f);
+		return;
+	}
+
+	flashrom(&read_file, &f, 62 /* blocks. 62 == Erase entire 4MB bank */);
+
+	f_close(&f);
+
+	printf("Flashing complete\n");
 }
 
 static void ls(void) {
@@ -202,8 +251,14 @@ void start(void) {
 			pwd();
 		} else if (input[0] == 'c' && input[1] == 'd') {
 			cd(&input[3]);
+		} else if (input[0] == 'f' && input[1] == 'l' &&
+				   input[2] == 'a' && input[3] == 's' &&
+				   input[4] == 'h') {
+			flash(&input[6]);
+		} else if (!strcmp("quit", input)) {
+			break;
 		} else {
-			skunkCONSOLEWRITE("Invalid command\n");
+			printf("Invalid command\n");
 		}
 	}
 done:

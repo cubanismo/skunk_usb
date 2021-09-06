@@ -477,12 +477,26 @@ void initbulkdev(USBDev *dev, short port)
 void readblocks(USBDev *dev, int blocknum, int blockcount, char *outBuf)
 {
 	int res;
+    int i;
+    int blocks;
 
-	res = bulkcmd(dev, 0x28, blocknum, blockcount, outBuf,
-				  blockcount * 0x200 /* XXX hard-coded block size */);
-	LOGV("readblocks(): bulkcmd returned 0x%08x\r\n", res);
-	assert(0 == res);
-	haddr = 0x4001;
+    /*
+     * XXX Because bulkcmd currently tries to reserve EZHost space for the
+     * entire transfer up front, it will fail for anything larger than
+     * about 2k or 4 blocks. Play it safe and transfer max 2 blocks at a
+     * time for now.
+     */
+#define BLOCK_SIZE 0x200 /* XXX hard-coded block size */
+    for (i = 0; i < blockcount; i += 2) {
+        blocks = (((blockcount - i) >= 2) ? 2 : 1);
+
+        res = bulkcmd(dev, 0x28, blocknum + i, blocks,
+                      outBuf + (i * BLOCK_SIZE),
+                      blocks * BLOCK_SIZE);
+        LOGV("readblocks(): bulkcmd returned 0x%08x\r\n", res);
+        assert(0 == res);
+        haddr = 0x4001;
+    }
 }
 
 void writeblocks(USBDev *dev, int blocknum, int blockcount, char *inBuf)
