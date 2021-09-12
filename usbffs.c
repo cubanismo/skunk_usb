@@ -113,6 +113,7 @@ static long read_file(void *priv, char *buf, unsigned int bytes)
 
 static void flash(const char *file) {
 	FRESULT res;
+	unsigned short erase_blocks = 62; /* Erase entire 4MB bank by default */
 
 	sprintf(path, "%s/%s", cwd, file);
 
@@ -132,7 +133,11 @@ static void flash(const char *file) {
 		return;
 	}
 
-	flashrom(&read_file, &f, 62 /* blocks. 62 == Erase entire 4MB bank */);
+	if (f_size(&f) <= 0x200000ul) {
+		erase_blocks = 30; /* ROM is <= 2MB. Only erase first 2MB */
+	}
+
+	flashrom(&read_file, &f, erase_blocks);
 
 	f_close(&f);
 
@@ -257,6 +262,9 @@ void start(void) {
 				   input[2] == 'a' && input[3] == 's' &&
 				   input[4] == 'h') {
 			flash(&input[6]);
+			f_unmount(DRIVE);
+			launchrom();
+		} else if (!strcmp("launch", input)) {
 			f_unmount(DRIVE);
 			launchrom();
 		} else if (!strcmp("quit", input)) {

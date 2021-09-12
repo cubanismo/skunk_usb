@@ -217,6 +217,8 @@ resetezhost:
 _launchrom:
 		move.l	#$800000, a0		; a0 = HPI data write
 		move.l	#$C00000, a1		; a1 = HPI address write/data read
+
+		move.w	#$FFFF, VI			; Disable video line interrupt
 		move.w	#$2700, sr			; Disable interrupts
 		move.l	#$FF0, d0			; Re-use the skunk's stop object list
 		swap	d0
