@@ -231,6 +231,8 @@ void start(void) {
 	skunkNOP();
 	skunkNOP();
 
+	printf("Starting up\n");
+
 	res = f_mount(&fs, DRIVE, 1);
 	if (res != FR_OK) {
 		printf("Failed mounting FS: %s\n", fresToStr(res));
@@ -255,6 +257,8 @@ void start(void) {
 				   input[2] == 'a' && input[3] == 's' &&
 				   input[4] == 'h') {
 			flash(&input[6]);
+			f_unmount(DRIVE);
+			launchrom();
 		} else if (!strcmp("quit", input)) {
 			break;
 		} else {
@@ -263,5 +267,6 @@ void start(void) {
 	}
 done:
 	f_unmount(DRIVE);
+	printf("Exiting\n");
 	skunkCONSOLECLOSE();
 }

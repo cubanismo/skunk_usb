@@ -2,6 +2,7 @@
 .include "skunk.inc"
 
 		.globl	_flashrom
+		.globl	_launchrom
 
 BUFSIZE		.equ $1000
 
@@ -32,13 +33,11 @@ _flashrom:
 		move.l	#$800000, a3		; a3 = HPI data write
 
 		move.l	(a0)+, a2			; get_data callback
-		move.l	(a0)+, a4			; get_data callback data
+		move.l	(a0)+, d5			; get_data callback data
 		move.w	(2,a0), d4			; block count. Must be 62 or 30
 
 		; XXX Make this a parameter
 		move.l	#$802000, a6		; Destination address
-
-		move.l	#$01c0, d6			; color index used during erase
 
 		move.w	#$4BA0, (a5)		; Set bank 0
 
@@ -62,6 +61,7 @@ _flashrom:
 		move.l	#$984000, a0
 .eraseloop:
 		jsr		EraseBlockInA0
+		;add.l	#$1, (aX)			; Increment number of blocks erased.
 		add.l	#16384, a0
 		dbra	d4, .eraseloop
 
@@ -86,7 +86,7 @@ _flashrom:
 .readblock:
 		move.l	#BUFSIZE, -(sp)	; Byte count
 		move.l	#buf, -(sp)		; destination buffer
-		move.l	a4, -(sp)		; Private data
+		move.l	d5, -(sp)		; Private data
 		jsr		(a2)			; Bytes read in d0
 		lea		(12,sp), sp		; restore stack
 		move.w	#$4000, (a5)	; Enter Flash read/write mode
@@ -161,16 +161,9 @@ EraseBlockInA0:
 
 ; XXX - Doesn't handle erase errors (but what can we do?)
 .waiterase:     
-		move.w	d6, BG
-		move.w	VC, d6
-		asl.w	#7, d6
-		ori.w	#$c0, d6
 		move.w	(a0), d0			; Zero means busy, 8 means ready
-		move.w	#0, BG          
 		and.w	#8, d0
 		beq		.waiterase
-
-		move.w	#$0, BG				; Indicate we succeeded.
 
 		move.w	#$4001, (a5)		; Enter Flash read-only mode
 
@@ -180,6 +173,67 @@ EraseBlockInA0:
 		move.l	(sp)+, a0
 		rts
 
+resetezhost:
+		move.w	#$7BAC, (a1)		; Force reset
+		move.w	#$4006, (a1)		; ...wait 16 cycles... enter HPI boot mode
+		move.w	#$4006, (a1)		; ...wait 16 cycles... enter HPI boot mode
+		move.w	#$7BAD, (a1)		; Exit reset (boot time)
+
+		move.l	#12000, d1			; Wait at least 4ms (full boot)
+.waitreset:
+		dbra	d1, .waitreset
+
+		move.w	#$4004, (a1)		; Enter HPI write mode
+
+		move.w	#140, (a1)			; Locate idle task
+		move.w	#$ee18, (a0)		; Force sie2_init
+		move.l	#3000, d1			; Wait at least 1ms (idle loop duration)
+.waitidle:
+		dbra	d1, .waitidle
+
+		move.w	#140, (a1)
+		move.w	#$f468, (a0)		; Restore usb_idle
+
+.dolock:
+		; hardlock sector 0, preventing any accidental overwriting of the BIOS
+		move.w	#$4000, (a1)		; Enter flash read/write mode
+
+		move.w	#$4BA0, (a1)		; Switch to bank 0
+
+		; 36A=9098 / 1C94=C501 / 36A=8008 / 36A=9098 / 1C94=C501 / Addr=8180
+		move.w	#$9098, $80036a		; 555=aa
+		move.w	#$c501, $801c94		; aaa=55
+		move.w	#$8008, $80036a		; 555=80
+		move.w	#$9098, $80036a		; 555=aa
+		move.w	#$c501, $801c94		; aaa=55
+		move.w	#$8180, $800000		; 0 = 60 -> sector lockdown
+
+		move.w	#$4001, (a1)		; return to HPI write mode
+
+		; XXX Set up serial EEPROM here.
+
+		rts
+
+_launchrom:
+		move.l	#$800000, a0		; a0 = HPI data write
+		move.l	#$C00000, a1		; a1 = HPI address write/data read
+		move.w	#$2700, sr			; Disable interrupts
+		move.l	#$FF0, d0			; Re-use the skunk's stop object list
+		swap	d0
+		move.l	d0, OLP				; Safe with interrups disabled? Works.
+		move.w	#0, OBF
+
+		move.w	#4001, (a1)			; set flash read-only mode
+		move.w	#$4BA0, (a1)		; Select bank 0
+
+		jsr		skunkCONSOLECLOSE
+		jsr		resetezhost
+
+		move.l	#INITSTACK, a7		; Set Atari's default stack
+		move.l	#$802000, a0
+		jsr		(a0)				; Go! Go! Go!
+		rts							; Unreachable
+
 		.data
 
 		.long
@@ -188,7 +242,6 @@ flashmsg: .dc.b	'Finished erase.',13,10,0
 		.long
 erasemsg: .dc.b	'Erased block.',13,10,0
 		.long
-
 
 		.bss
 
