@@ -4,20 +4,22 @@
 #include <string.h>
 #include "sprintf.h"
 #include "flash.h"
+#include "ffsgpu.h"
 #include "ffs/ff.h"
 #include "ffs/diskio.h"
+
+extern unsigned long testgpu(void);
 
 #define NUM_DEVS 2
 static USBDev devs[NUM_DEVS];
 static BYTE initialized[NUM_DEVS];
 static char cwd[4096];
 static char path[4096];
+static char input[1024];
 static FATFS fs;
 static DIR dir;
 static FILINFO fi;
 static FIL f;
-/* XXX Put this last, or skunkCONSOLEREAD() will clobber cwd now. Why?!? */
-static char input[1024];
 
 DSTATUS disk_initialize(BYTE pdrv)
 {
@@ -228,6 +230,8 @@ void start(void) {
 	FRESULT res;
 	int i;
 
+	startgpu();
+
 	for (i = 0; i < NUM_DEVS; i++) {
 		initialized[i] = 0;
 	}
@@ -269,6 +273,8 @@ void start(void) {
 			launchrom();
 		} else if (!strcmp("quit", input)) {
 			break;
+		} else if (!strcmp("testgpu", input)) {
+			printf("gpusem = %u\n", testgpu());
 		} else {
 			printf("Invalid command\n");
 		}
