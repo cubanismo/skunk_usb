@@ -52,13 +52,14 @@
 	.include    "jaguar.inc"
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-; Begin SCREEN GEOMETRY CONFIGURATION
+; Begin SkunkUSB LOGO GEOMETRY CONFIGURATION
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 PPP		.equ	64			; Pixels per Phrase (16-bit)
-BMP_WIDTH	.equ	320			; Width in Pixels
-BMP_HEIGHT	.equ	160			; Height in Pixels
-BMP_PHRASES	.equ	(BMP_WIDTH/PPP)
+LGO_WIDTH	.equ	320			; Width in Pixels
+LGO_HEIGHT	.equ	160			; Height in Pixels
+LGO_PHRASES	.equ	(LGO_WIDTH/PPP)
+SCALESPEED	.equ	4			; Scale once every <n> VSyncs
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; End SCREEN GEOMETRY CONFIGURATION
@@ -76,11 +77,17 @@ BMP_PHRASES	.equ	(BMP_WIDTH/PPP)
 		.globl  a_hde
 		.globl  _width
 		.globl  _height
+		.globl	_doscale
 ; Externals
 		.extern	_start
 
-BITMAP_OFF  	.equ    (2*8)       		; Two Phrases int list
-LISTSIZE    	.equ    5       		; List length (in phrases)
+SZ_BM		.equ	(2*8)
+SZ_SBM		.equ	(3*8)
+SZ_GPU		.equ	(1*8)
+SZ_BRA		.equ	(1*8)
+SZ_STP		.equ	(1*8)
+BITMAP_OFF  	.equ    (2*SZ_BRA)     		; Bitmap is after 2 branch objs
+LISTSIZE    	.equ    ((SZ_BRA*2)+SZ_SBM+SZ_STP)	; List length (in bytes)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Program Entry Point Follows...
 
@@ -251,11 +258,15 @@ calc_vals:
 		
 InitLister:
 		movem.l d1-d4/a0,-(sp)		; Save registers
+
+		move.w	#1, deltas		; Init scale delta value
+		move.w	#0, _doscale		; Don't scale at startup
+		move.w	#SCALESPEED, scalespeed	; Higher is slower
 			
 		lea     listbuf,a0
 		move.l  a0,d2           	; Copy
 
-		add.l   #(LISTSIZE-1)*8,d2  	; Address of STOP object
+		add.l   #LISTSIZE-SZ_STP,d2  	; Address of STOP object
 		move.l	d2,d3			; Copy for low half
 
 		lsr.l	#8,d2			; Shift high half into place
@@ -291,21 +302,24 @@ InitLister:
 		move.l	d0,(a0)+
 		move.l	d1,(a0)+
 
-; Write a standard BITMAP object
+; Write a Scaled Bitmap object: First Phrase
 		move.l	d2,d0
 		move.l	d3,d1
+		ori.w	#SCBITOBJ, d1		; Set type = Scaled Bitmap
 
-		ori.l  #BMP_HEIGHT<<14,d1       ; Height of image
+		; Use (height - 1) for scaled bitmap objects, full height for
+		; regular bitmap objects.
+		ori.l  #(LGO_HEIGHT-1)<<14,d1	; Height of image
 
 		move.w  _height,d4           	; Center bitmap vertically
-		sub.w   #BMP_HEIGHT,d4
+		sub.w   #(LGO_HEIGHT-1),d4
 		add.w   a_vdb,d4
 		andi.w  #$FFFE,d4               ; Must be even, half-lines.
 		lsl.w   #3,d4
 		or.w    d4,d1                   ; Stuff YPOS in low phrase
 
 		;move.l	#_screen,d4
-		move.l	#skunkbits,d4
+		move.l	#logobits,d4
 		lsl.l	#8,d4			; Assumes phrase-aligned buffer,
 		or.l	d4,d0			; so no masking of lower bits
 
@@ -313,20 +327,29 @@ InitLister:
 		move.l	d1,(a0)+
 		movem.l	d0-d1,bmpupdate
 
-; Second Phrase of Bitmap
-		move.l	#(BMP_PHRASES>>4)|O_TRANS,d0	; Only part of top LONG is IWIDTH
+; Second Phrase of Scaled Bitmap
+		move.l	#(LGO_PHRASES>>4)|O_TRANS,d0	; Only part of top LONG is IWIDTH
 		move.l  #O_DEPTH1|O_NOGAP,d1	; BPP = 1, Contiguous phrases
 
 		move.w  _width,d4            	; Get width in clocks
 		lsr.w   #2,d4               	; /4 Pixel Divisor
-		sub.w   #BMP_WIDTH,d4
+		sub.w   #LGO_WIDTH,d4
 		lsr.w   #1,d4
 		or.w    d4,d1
 
-		ori.l	#(BMP_PHRASES<<18)|(BMP_PHRASES<<28),d1 ; DWIDTH|IWIDTH
+		ori.l	#(LGO_PHRASES<<18)|(LGO_PHRASES<<28),d1 ; DWIDTH|IWIDTH
 
 		move.l	d0,(a0)+
 		move.l	d1,(a0)+
+		move.l	d1,bmpupdate+8
+
+; Third Phrase of Scaled Bitmap
+		moveq	#0, d0			; Nothing in bits 32-63
+		move.l	#(1<<21)|(1<<13)|(1<<5), d1 ; REMAINDER|VSCALE|HSCALE
+
+		move.l	d0,(a0)+
+		move.l	d1,(a0)+
+		move.l	d1,bmpupdate+12
 
 ; Write a STOP object at end of list
 		clr.l   (a0)+
@@ -346,7 +369,7 @@ InitLister:
 ;        destroyed by the object processor.
 
 UpdateList:
-		movem.l  d0-d2/a0,-(sp)
+		movem.l  d0-d3/a0,-(sp)
 
 		move.w	time,d0			; load time and update it
 		add.w	deltat,d0
@@ -369,17 +392,55 @@ UpdateList:
 		move.l	d2,BORD1		; update border color
 		move.w	d2,BG			; update background color
 
+
 		move.l  #listbuf+BITMAP_OFF,a0
 
-		move.l  bmpupdate,(a0)      	; Phrase = d1.l/d0.l
-		move.l  bmpupdate+4,4(a0)
+		move.l	bmpupdate+12, d2	; Calculate BMP scale
+		move.l	d2, d0			; Use last value if disabled
+		cmp.w	#0, _doscale
+		beq	.noscale
+		sub.w	#1, scalespeed
+		bne	.noscale
+		move.w	#SCALESPEED, scalespeed
+
+		and.l	#$ff, d2		; Otherwise, update scale delta
+		bz	.revscale
+		cmp.w	#(1<<5), d2
+		bne	.adjscale
+.revscale:
+		neg.w	deltas
+
+.adjscale:
+		add.w	deltas, d2		; Calculate new scale
+		move.l	d2, d1			; Use it to update XPOS
+		mulu	#LGO_WIDTH, d1		; width * scale
+		lsr.l	#5, d1			; Adjust for 3.5 fixed point
+		move.l	bmpupdate+8, d3		; Original Phrase 2 low long
+		; Below is only safe if 0 <= (XPOS + width) <= 2047
+		add.w	#LGO_WIDTH, d3		; XPOS + width
+		sub.w	d1, d3			; XPOS + width - (width * scale)
+		move.l	d3, 12(a0)		; Store in phase 2's lower long
+		; Don't store d3 in bmpupdate+8. The logic here relies on that
+		; field always containing the original XPOS value.
+
+		move.l	d2, d0			; Save REMAINDER|VSCALE|HSCALE
+		lsl.l	#8, d2
+		or.l	d2, d0
+		lsl.l	#8, d2
+		or.l	d2, d0
+.noscale:
+		move.l	d0, bmpupdate+12
+
+		move.l  bmpupdate,(a0)      	; Restore the 1st and lower half
+		move.l  bmpupdate+4,4(a0)	; of the 3rd phrases of the
+		move.l  bmpupdate+12,20(a0)	; scaled bitmap object
 
 		add.l	#1,_ticks		; Increment ticks semaphore
 
 		move.w  #$101,INT1      	; Signal we're done
 		move.w  #$0,INT2
 
-		movem.l	(sp)+,d0-d2/a0
+		movem.l	(sp)+,d0-d3/a0
 		rte
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -391,8 +452,8 @@ UpdateList:
 		; boundary after 2 Phrases of branch objects.  This allows it
 		; to be either a regular bitmap or scaled bitmap entry.
 		.ds.l	4
-listbuf:    	.ds.l   LISTSIZE*2  		; Object List
-bmpupdate:  	.ds.l   3       		; 3 Longs of Scaled Bitmap for Refresh
+listbuf:    	.ds.l   LISTSIZE/4  		; Object List
+bmpupdate:  	.ds.l   4       		; 4 longs of SCBITOBJ for Refresh
 _ticks:		.ds.l	1			; Incrementing # of ticks
 a_hdb:  	.ds.w   1
 a_hde:      	.ds.w   1
@@ -401,7 +462,9 @@ a_vde:      	.ds.w   1
 _width:      	.ds.w   1
 _height:     	.ds.w   1
 
-		.long
+_doscale:	.ds.w	1
+scalespeed:	.ds.w	1
+deltas:		.ds.w	1
 deltat:		.ds.w	1
 time:		.ds.w	1
 
@@ -410,6 +473,6 @@ time:		.ds.w	1
 
 		.data
 		.phrase
-skunkbits:	.incbin "skunkusb.raw"
+logobits:	.incbin "skunkusb.raw"
 
 		.end

@@ -9,6 +9,7 @@
 #include "ffs/diskio.h"
 
 extern unsigned long testgpu(void);
+extern unsigned short doscale;
 
 #define NUM_DEVS 2
 static USBDev devs[NUM_DEVS];
@@ -275,6 +276,8 @@ void start(void) {
 			break;
 		} else if (!strcmp("testgpu", input)) {
 			printf("gpusem = %u\n", testgpu());
+		} else if (!strcmp("togglescale", input)) {
+			doscale = !doscale;
 		} else {
 			printf("Invalid command\n");
 		}
