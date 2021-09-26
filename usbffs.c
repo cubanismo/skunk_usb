@@ -267,9 +267,11 @@ void start(void) {
 				   input[4] == 'h') {
 			flash(&input[6]);
 			f_unmount(DRIVE);
+			stopgpu();
 			launchrom();
 		} else if (!strcmp("launch", input)) {
 			f_unmount(DRIVE);
+			stopgpu();
 			launchrom();
 		} else if (!strcmp("quit", input)) {
 			break;

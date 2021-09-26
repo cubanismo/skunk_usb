@@ -220,10 +220,6 @@ _launchrom:
 
 		move.w	#$FFFF, VI			; Disable video line interrupt
 		move.w	#$2700, sr			; Disable interrupts
-		move.l	#$FF0, d0			; Re-use the skunk's stop object list
-		swap	d0
-		move.l	d0, OLP				; Safe with interrups disabled? Works.
-		move.w	#0, OBF
 
 		move.w	#4001, (a1)			; set flash read-only mode
 		move.w	#$4BA0, (a1)		; Select bank 0

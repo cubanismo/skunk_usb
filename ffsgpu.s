@@ -7,6 +7,7 @@
 
 			.globl	_startgpu
 			.globl	_testgpu
+			.globl	_stopgpu
 
 gpustack	.equ	G_RAM+4096
 
@@ -39,6 +40,7 @@ _startgpu:
 			andi.l	#1, d0
 			beq		.waitblit
 
+			clr.w	gpustop				; Clear the gpustop flag
 			clr.w	_gpusem				; Initialize the GPU semaphore
 			move.l	#gpuinit, G_PC		; Start the GPU init code
 			move.l	#RISCGO, G_CTRL
@@ -49,12 +51,21 @@ _startgpu:
 			rts
 
 _testgpu:
-			moveq	#0, d0			; Clear high word of d0
-			move.w	_gpusem, d1		; Load initial value of _gpusem to d0
+			moveq	#0, d0				; Clear high word of d0
+			move.w	_gpusem, d1			; Load initial value of _gpusem to d0
 			move.l	#RISCGO|FORCEINT0, G_CTRL	; Force a CPU interrupt on GPU
-.waitintr:	move.w	_gpusem, d0		; Wait for _gpusem to change
+.waitintr:	move.w	_gpusem, d0			; Wait for _gpusem to change
 			cmp.w	d1, d0
 			beq		.waitintr
+
+			rts
+
+_stopgpu:
+			move.w	#1, gpustop			; Tell the GPU to stop
+
+.waitgpu:	move.l	G_CTRL, d0			; Wait for the GPU to go to sleep
+			andi.l	#RISCGO, d0
+			bne		.waitgpu
 
 			rts
 
@@ -175,8 +186,34 @@ gpuinit:
 			moveq	#1, r1
 			storew	r1, (r0)
 
-.infinite:	movei	#.infinite, r0
-			jump	(r0)
+			movei	#gpustop, r0
+.infinite:	loadw	(r0), r1
+			cmpq	#1, r1
+			jr		NE, .infinite
+			nop
+
+			; Park the OLP on a stop object
+			movei	#_ticks, r4			; &_ticks->r4
+			movei	#OBF, r2			; &OBF->r2
+			movei	#OLP, r3			; &OLP->r3
+			movei	#$FF0, r0			; Re-use the skunk's stop object list
+
+			load	(r4), r5			; ticks->r5
+.waittick:	load	(r4), r6			; ticks->r6
+			cmp		r5, r6
+			jr		EQ, .waittick		; Wait until vblank
+			nop
+
+			rorq	#16, r0				; Swap address words for OLP
+			moveq	#0, r1
+			store	r0, (r3)			; Set OLP
+			storew	r1, (r2)			; Clear OBF
+
+			; Stop GPU
+			moveq	#0, r0
+			movei	#G_CTRL, r1
+			store	r0, (r1)
+			nop
 			nop
 
 gpucpuint:
@@ -323,5 +360,6 @@ gpucodex:
 			.long
 
 _gpusem:	.ds.w	1
+gpustop:	.ds.w	1
 
 			.end
