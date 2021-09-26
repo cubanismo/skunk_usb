@@ -23,9 +23,7 @@ SCALESPEED		.equ	4			; Scale once every <n> VSyncs
 				.extern scalespeed
 
 ; Globals Functions:
-				.extern	InitGPUOBJ
-				.extern	InitLister
-				.extern	UpdateList
+				.extern	InitGPUOP
 
 ; Object Processor Object Size Constants
 SZ_BM			.equ	(2*8)

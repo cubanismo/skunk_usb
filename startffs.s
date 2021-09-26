@@ -1,12 +1,3 @@
-;-----------------------------------------------------------------------------
-; Warning!!! Warning!!! Warning!!! Warning!!! Warning!!! Warning!!! Warning!!!
-; Warning!!! Warning!!! Warning!!! Warning!!! Warning!!! Warning!!! Warning!!!
-;-----------------------------------------------------------------------------
-; Do not change any of the code in this file except where explicitly noted.
-; Making other changes can cause your program's startup code to be incorrect.
-;-----------------------------------------------------------------------------
-
-
 ;----------------------------------------------------------------------------
 ; Jaguar Development System Source Code
 ; Copyright (c)1995 Atari Corp.
@@ -46,8 +37,8 @@
 ; All video configuration variables are exposed for program use.
 ;-----------------------------------------------------------------------------
 
-	.include	"jaguar.inc"
-	.include	"ffsobj.inc"
+		.include	"jaguar.inc"
+		.include	"ffsobj.inc"
 
 ; Globals
 		.globl  a_vdb
@@ -70,41 +61,15 @@
 		move.l  #INITSTACK,a7   	; Setup a stack
 
 		jsr 	InitVideo      		; Setup our video registers.
-		jsr 	InitLister     		; Initialize Object Display List
-		;jsr 	InitVBint      		; Initialize our VBLANK routine
+		jsr	InitGPUOP		; Start the GPU and OP
 
-		jsr	InitGPUOBJ
+		jmp 	_start			; Jump to main code
 
-	     	jmp 	_start			; Jump to main code
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-; Procedure: InitVBint
-; Install our vertical blank handler and enable interrupts
-;
-
-InitVBint:
-		move.l  d0,-(sp)
-
-		move.l  #UpdateList,LEVEL0	; Install 68K LEVEL0 handler
-
-		move.w  a_vde,d0        	; Must be ODD
-		ori.w   #1,d0
-		move.w  d0,VI
-
-		move.w  #C_VIDENA,INT1         	; Enable video interrupts
-
-		move.w  sr,d0
-		and.w   #$F8FF,d0       	; Lower 68k IPL to allow
-		move.w  d0,sr           	; interrupts
-
-		move.l  (sp)+,d0
-		rts
-		
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; Procedure: InitVideo (same as in vidinit.s)
 ;            Build values for hdb, hde, vdb, and vde and store them.
 ;
-						
+
 InitVideo:
 		movem.l d0-d6,-(sp)
 			
@@ -166,11 +131,11 @@ calc_vals:
 
 		.bss
 
-a_hdb:  	.ds.w   1
-a_hde:      	.ds.w   1
-a_vdb:      	.ds.w   1
-a_vde:      	.ds.w   1
-width:      	.ds.w   1
-height:     	.ds.w   1
+a_hdb:	 	.ds.w   1
+a_hde:	 	.ds.w   1
+a_vdb:		.ds.w   1
+a_vde:		.ds.w   1
+width:		.ds.w   1
+height:		.ds.w   1
 
 		.end
