@@ -1,4 +1,5 @@
 			.include "jaguar.inc"
+			.include "ffsobj.inc"
 
 			.globl	gpucode
 			.globl	gpucodex
@@ -67,6 +68,11 @@ isr_sp		.equr	r31
 isr_reg0	.equr	r30
 isr_reg1	.equr	r29
 isr_reg2	.equr	r28
+isr_reg3	.equr	r27
+isr_reg4	.equr	r26
+isr_reg5	.equr	r25
+isr_reg6	.equr	r24
+isr_regi	.equr	r15
 
 ;;
 ;; Each GPU interrupt vector entry is 16 bytes (8 16-bit words)
@@ -123,14 +129,47 @@ isr_reg2	.equr	r28
 
 ; GPU init routine
 gpuinit:
-			movei	#gpustack, r31
+			movei	#gpustack, isr_sp
 
-			movei	#G_FLAGS, r0		; Enable CPU & OP interrupts
-			;movei	#G_CPUENA|G_OPENA, r1
-			;movei	#G_CPUENA, r1
+			; Initialize ticks
+			movei	#_ticks, r3
+			moveq	#0, r2
+			store	r2, (r3)
+
+			; Enable CPU and Object Processorinterrupts
+			movei	#G_FLAGS, r0
+			movei	#G_CPUENA|G_OPENA, r1
 			load	(r0), r2
 			or		r2, r1
 			store	r1, (r0)
+
+			; Overwrite the first scaled bitmap object with a stop
+			; object. The object processor interrupt overwritess
+			; the first phrase of bitmap objects every time it runs,
+			; so this will cause graphics to appear on the first
+			; frame after the object processor is started.
+			movei	#listbuf+BITMAP_OFF, r14
+			moveq	#$0, r1
+			moveq	#$C, r2
+			store	r1, (r14)
+			store	r2, (r14+1)			; store to r14 + (1 long word)
+
+			; Init the Object Processor List Pointer
+			movei	#listbuf+LIST_START_OFF, r0
+			movei	#OLP, r1
+			rorq	#16, r0				; Swap address for OLP
+			store	r0, (r1)
+
+			; Set up a black/white CLUT
+			movei	#CLUT, r2
+			movei	#$0000FFFF, r1		; RGB black/white
+			;movei	#$000077FF, r1		; CRY black/white
+			store	r1, (r2)
+
+			; Set the video mode
+			movei	#PWIDTH4|BGEN|CSYNC|RGB16|VIDEN, r2
+			movei	#VMODE, r0
+			storew	r2, (r0)
 
 			movei	#_gpusem, r0		; Indicate init complete
 			moveq	#1, r1
@@ -159,9 +198,115 @@ gpucpuint:
 			store	isr_reg1, (isr_reg0)
 
 gpuopint:
-			; ... Actual ISR routine
+			; Before anything, restart the object processor
+			movei	#OBF, isr_reg4			; Writing any value to OBF restarts
+			storew	isr_reg3, (isr_reg4)	; the object processor
 
-			movei	#G_FLAGS, isr_reg0
+			; First, strobe the background color from black->purple->black
+			movei	#time, isr_reg0
+			movei	#deltat, isr_reg1
+			load	(isr_reg0), isr_reg2	; Load time in isr_reg2
+			load	(isr_reg1), isr_reg3	; Load deltat in isr_reg3
+			movei	#$100, isr_reg4			; Load constant 0x100 in isr_reg4
+			add		isr_reg3, isr_reg2		; Add deltat to time
+			jr		EQ, .reverse			; If result is zero, negate deltat
+			cmp		isr_reg4, isr_reg2		; Always: Compare time with 0x100
+			jr		NE, .goodtime			; If equal, negate deltat
+.reverse:	store	isr_reg2, (isr_reg0)	; Always: Store new time back to mem
+			neg		isr_reg3
+			store	isr_reg3, (isr_reg1)
+
+.goodtime:	moveq	#$0a, isr_reg0			; Load blue component in isr_reg0
+			mult	isr_reg2, isr_reg0		; Multiply blue by time
+			movei	#$7c0, isr_reg1			; Load blue bits mask in isr_reg1
+			shrq	#2, isr_reg0			; Shift into blue bits spot
+			moveq	#$05, isr_reg3			; load red component in isr_reg3
+			and		isr_reg1, isr_reg0		; Mask off non-blue bits in isr_reg0
+			movei	#$ff00, isr_reg4		; Load red bits mask in isr_reg4
+			mult	isr_reg2, isr_reg3		; Multiply red by time
+			and		isr_reg4, isr_reg3		; Mask off non-red bits in isr_reg3
+			shlq	#3, isr_reg3			; Shift into red bits spot
+			movei	#BORD1, isr_reg1		; Get address of BORD1 in isr_reg1
+			movei	#BG, isr_reg2			; Get address of BG in isr_reg2
+			or		isr_reg3, isr_reg0		; Combine red and blue bits
+			store	isr_reg0, (isr_reg1)	; Store in BORD1
+			storew	isr_reg0, (isr_reg2)	; Store in BG
+
+			; Scale the bitmap
+			movei	#bmpupdate, isr_regi
+			movei	#_doscale, isr_reg3
+			load	(isr_regi+3), isr_reg2	; Load old scalingvals in isr_reg2
+			loadw	(isr_reg3), isr_reg1	; Load _doscale in isr_reg1
+			movei	#scalespeed, isr_reg5
+			move	isr_reg2, isr_reg0		; Save a copy of old scaling vals
+			movei	#.noscale, isr_reg4
+			loadw	(isr_reg5), isr_reg3	; Load scalespeed into isr_reg3
+			cmpq	#0, isr_reg1			; Is _doscale == 0?
+			jump	EQ, (isr_reg4)			; jump to .noscale
+			nop
+			subq	#1, isr_reg3			; Subtract 1 from scalespeed
+			jump	NE, (isr_reg4)			; jump to .noscale
+			nop
+
+			moveq	#SCALESPEED, isr_reg3	; Reset scalespeed counter
+			movei	#deltas, isr_reg6		; isr_reg6 = &deltas
+			movei	#$ff, isr_reg4			; Set up a mask
+			load	(isr_reg6), isr_reg1	; Load deltas to isr_reg1
+			and		isr_reg4, isr_reg2		; Isolate the HSCALE value
+			jr		EQ, .revscale
+			moveq	#(1<<4), isr_reg4		; Load 1<<5 into isr_reg4
+			shlq	#1, isr_reg4
+			cmp		isr_reg4, isr_reg2		; if scale!=1<<5, leave deltas alone
+			jr		NE, .adjscale
+			nop
+
+.revscale:	neg		isr_reg1				; Negate & store deltas if needed
+			store	isr_reg1, (isr_reg6)
+
+.adjscale:	add		isr_reg1, isr_reg2		; Add deltas to scale
+			move	isr_reg2, isr_reg6		; Use it to update XPOS
+			movei	#LGO_WIDTH, isr_reg1
+			mult	isr_reg1, isr_reg6		; width * scale
+			shrq	#5, isr_reg6			; Adjust for 3.5 fixed point
+			load	(isr_regi+2), isr_reg4	; Original Phrase 2 low dword
+			; The below is only safe if 0 <= (XPOS + width) <= 2047
+			add		isr_reg1, isr_reg4		; XPOS + width
+			sub		isr_reg6, isr_reg4		; XPOS + width - (width * scale)
+			movei	#listbuf+BITMAP_OFF+12, isr_reg1
+			store	isr_reg4, (isr_reg1)	; Store in phrase 2's lower dword
+			; Don't store isr_reg4 in bmpupdate+8/isr_regi+2. The logic here
+			; relies on that field always containing the original XPOS value.
+
+			move	isr_reg2, isr_reg0		; Save REMAINDER|VSCALE|HSCALE
+			shlq	#8, isr_reg2
+			or		isr_reg2, isr_reg0
+			shlq	#8, isr_reg2
+			or		isr_reg2, isr_reg0
+
+.noscale:	storew	isr_reg3, (isr_reg5)	; Store the updated scalespeed
+			store	isr_reg0, (isr_regi+3)	; Store the final scaling vals
+
+			; Now update the rest of the scaled bitmap object
+			load	(isr_regi), isr_reg1	; Load phrase 1 high dword
+			load	(isr_regi+1), isr_reg2	; Load phrase 1 low dword
+
+			movei	#listbuf+BITMAP_OFF, isr_regi
+
+			or		isr_reg1, isr_reg1		; Work-around indexed store bug
+			or		isr_reg2, isr_reg2
+
+			store	isr_reg1, (isr_regi)	; Store phrase 1 high dword
+			store	isr_reg2, (isr_regi+1)	; Store phrase 1 low dword
+			store	isr_reg0, (isr_regi+5)	; Store phrase 3 low dword
+
+			; Increment _ticks
+			movei	#_ticks, isr_reg4
+			load	(isr_reg4), isr_reg0
+			addq	#1, isr_reg0
+			store	isr_reg0, (isr_reg4)
+
+			; Exit the interrupt
+			movei	#G_FLAGS, isr_reg0		
 			load	(isr_reg0), isr_reg1
 			bclr	#3, isr_reg1
 			bset	#12, isr_reg1

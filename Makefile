@@ -15,14 +15,22 @@ DUMPOBJS = usbdump.o skunk.o
 
 VERIFOBJS = usbverif.o skunk.o
 
-FFSOBJS = ffs/ff.o ffs/ffunicode.o usbffs.o string.o skunk.o flash.o ffsgpu.o
+FFSSTART = startffs.o
+FFSOBJS = ffsobj.o \
+	ffs/ff.o \
+	ffs/ffunicode.o \
+	usbffs.o \
+	string.o \
+	skunk.o \
+	flash.o \
+	ffsgpu.o
 
 OBJS = $(COMMONOBJS) \
 	$(COMMONSTART) \
 	$(TESTOBJS) \
 	$(DUMPOBJS) \
 	$(FFSOBJS) \
-	startffs.o
+	$(FFSSTART)
 
 TESTCOF = testdrv.cof
 DUMPCOF = usbdump.cof
@@ -42,7 +50,7 @@ $(DUMPCOF): $(COMMONSTART) $(COMMONOBJS) $(DUMPOBJS)
 $(VERIFCOF): $(COMMONSTART) $(COMMONOBJS) $(VERIFOBJS)
 	$(LINK) $(LINKFLAGS) -o $@ $^
 
-$(FFSCOF): startffs.o $(COMMONOBJS) $(FFSOBJS)
+$(FFSCOF): $(FFSSTART) $(FFSOBJS) $(COMMONOBJS)
 	$(LINK) $(LINKFLAGS) -o $@ $^
 
 skunkc.o: $(SKUNKDIR)/lib/skunkc.s

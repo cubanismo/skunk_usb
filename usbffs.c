@@ -10,6 +10,7 @@
 
 extern unsigned long testgpu(void);
 extern unsigned short doscale;
+extern unsigned long ticks;
 
 #define NUM_DEVS 2
 static USBDev devs[NUM_DEVS];
@@ -231,8 +232,6 @@ void start(void) {
 	FRESULT res;
 	int i;
 
-	startgpu();
-
 	for (i = 0; i < NUM_DEVS; i++) {
 		initialized[i] = 0;
 	}
@@ -278,6 +277,8 @@ void start(void) {
 			printf("gpusem = %u\n", testgpu());
 		} else if (!strcmp("togglescale", input)) {
 			doscale = !doscale;
+		} else if (!strcmp("getticks", input)) {
+			printf("ticks = %u\n", ticks);
 		} else {
 			printf("Invalid command\n");
 		}
