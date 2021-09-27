@@ -8,6 +8,7 @@
 			.globl	_startgpu
 			.globl	_testgpu
 			.globl	_stopgpu
+			.globl	_clrgamelst
 
 gpustack	.equ	G_RAM+4096
 
@@ -40,7 +41,7 @@ _startgpu:
 			andi.l	#1, d0
 			beq		.waitblit
 
-			clr.w	gpustop				; Clear the gpustop flag
+			clr.w	gpucmd				; Clear the gpucmd message
 			clr.w	_gpusem				; Initialize the GPU semaphore
 			move.l	#gpuinit, G_PC		; Start the GPU init code
 			move.l	#RISCGO, G_CTRL
@@ -60,11 +61,19 @@ _testgpu:
 
 			rts
 
-_stopgpu:
-			move.w	#1, gpustop			; Tell the GPU to stop
+_stopgpu:	; Tell the GPU to stop
+			move.w	#GCMD_STOP, gpucmd
 
 .waitgpu:	move.l	G_CTRL, d0			; Wait for the GPU to go to sleep
 			andi.l	#RISCGO, d0
+			bne		.waitgpu
+
+			rts
+
+_clrgamelst: ; Tell the GPU to clear gamelstbm
+			move.w	#GCMD_CLRLIST, gpucmd
+
+.waitgpu:	cmpi.w	#0, gpucmd			; Wait for the GPU to finish the clear
 			bne		.waitgpu
 
 			rts
@@ -84,6 +93,12 @@ isr_reg4	.equr	r26
 isr_reg5	.equr	r25
 isr_reg6	.equr	r24
 isr_regi	.equr	r15
+
+rgpucmd		.equr	r13
+
+; The GPU code will recognize these commands when stored in gpucmd
+GCMD_STOP		.equ	1
+GCMD_CLRLIST	.equ	2
 
 ;;
 ;; Each GPU interrupt vector entry is 16 bytes (8 16-bit words)
@@ -159,7 +174,7 @@ gpuinit:
 			; the first phrase of bitmap objects every time it runs,
 			; so this will cause graphics to appear on the first
 			; frame after the object processor is started.
-			movei	#listbuf+BITMAP_OFF, r14
+			movei	#listbuf+BMLOGO_OFF, r14
 			moveq	#$0, r1
 			moveq	#$C, r2
 			store	r1, (r14)
@@ -186,13 +201,34 @@ gpuinit:
 			moveq	#1, r1
 			storew	r1, (r0)
 
-			movei	#gpustop, r0
-.infinite:	loadw	(r0), r1
-			cmpq	#1, r1
-			jr		NE, .infinite
+			movei	#gpucmd, rgpucmd
+infinite:	loadw	(rgpucmd), r1
+			cmpq	#0, r1
+			jr		EQ, infinite
+
+			cmpq	#GCMD_STOP, r1
+			jr		NE, .notstop
 			nop
 
-			; Park the OLP on a stop object
+			movei	#stopgpu, r0
+			jump	(r0)
+.notstop:
+			cmpq	#GCMD_CLRLIST, r1
+			jr		NE, .notclrlist
+			nop
+
+			movei	#clrlist, r0
+			jump	(r0)
+
+.notclrlist:
+			; Unknown command. Clear it and continue.
+			moveq	#0, r1
+			storew	r1, (rgpucmd)
+			movei	#infinite, r0
+			jump	(r0)
+			nop
+
+stopgpu:	; Park the OLP on a stop object
 			movei	#_ticks, r4			; &_ticks->r4
 			movei	#OBF, r2			; &OBF->r2
 			movei	#OLP, r3			; &OLP->r3
@@ -214,6 +250,58 @@ gpuinit:
 			movei	#G_CTRL, r1
 			store	r0, (r1)
 			nop
+			nop
+
+clrlist:	; Clear the game list bitmap
+			moveq	#0, r0				; 0 will be stored in various fields
+
+			movei	#gamelstbm, r1
+			movei	#A1_BASE, r2
+
+			movei	#A1_CLIP, r3
+
+			store	r1, (r2)			; Store A1_BASE (destination addr)
+			store	r0, (r3)			; Store 0 in A1_CLIP (No clipping)
+
+			.assert GL_WIDTH = 192
+			movei	#PITCH1|PIXEL1|WID192|XADDPIX|YADD0, r4
+			movei	#A1_FLAGS, r5
+
+			movei	#A1_PIXEL, r6
+			movei	#A1_FPIXEL, r7
+
+			; Add (1, -GL_WIDTH) to x, y pointers after each inner loop iter
+			movei	#(1<<16)|((-GL_WIDTH)&$ffff), r8
+			movei	#A1_STEP, r9
+			movei	#A1_FSTEP, r10
+			movei	#A1_FPIXEL, r11
+
+			store	r4, (r5)			; Store A1_FLAGS
+			store	r0, (r6)			; Store 0 in A1_PIXEL
+			store	r0, (r7)			; Store 0 in A1_FPIXEL
+			store	r8, (r9)			; Store (1, -GL_WIDTH)->A1_STEP
+			store	r0, (r10)			; Store 0 in A1_FSTEP
+			store	r0, (r11)			; Store 0 in A1_FPIXEL
+
+			movei	#(GL_HEIGHT<<16)|GL_WIDTH, r1
+			movei	#B_COUNT, r2
+
+			movei	#DSTEN|UPDA1|LFU_CLEAR, r3	; 1bit pixels need DSTEN
+			movei	#B_CMD, r4
+
+			store	r1, (r2)			; Write loop dimensions to B_COUNT
+			store	r3, (r4)			; Write op to B_CMD
+
+.waitblit:
+			load	(r4), r0			; Read back blit status
+			btst	#0, r0				; See if bit 0 is set
+			jr		NE, .waitblit
+
+			; Done. Clear the command and return to the message loop
+			moveq	#0, r1
+			storew	r1, (rgpucmd)
+			movei	#infinite, r0
+			jump	(r0)
 			nop
 
 gpucpuint:
@@ -309,7 +397,7 @@ gpuopint:
 			; The below is only safe if 0 <= (XPOS + width) <= 2047
 			add		isr_reg1, isr_reg4		; XPOS + width
 			sub		isr_reg6, isr_reg4		; XPOS + width - (width * scale)
-			movei	#listbuf+BITMAP_OFF+12, isr_reg1
+			movei	#listbuf+BMLOGO_OFF+12, isr_reg1
 			store	isr_reg4, (isr_reg1)	; Store in phrase 2's lower dword
 			; Don't store isr_reg4 in bmpupdate+8/isr_regi+2. The logic here
 			; relies on that field always containing the original XPOS value.
@@ -323,11 +411,11 @@ gpuopint:
 .noscale:	storew	isr_reg3, (isr_reg5)	; Store the updated scalespeed
 			store	isr_reg0, (isr_regi+3)	; Store the final scaling vals
 
-			; Now update the rest of the scaled bitmap object
+			; Now update the rest of the logo scaled bitmap object
 			load	(isr_regi), isr_reg1	; Load phrase 1 high dword
 			load	(isr_regi+1), isr_reg2	; Load phrase 1 low dword
 
-			movei	#listbuf+BITMAP_OFF, isr_regi
+			movei	#listbuf+BMLOGO_OFF, isr_regi
 
 			or		isr_reg1, isr_reg1		; Work-around indexed store bug
 			or		isr_reg2, isr_reg2
@@ -335,6 +423,18 @@ gpuopint:
 			store	isr_reg1, (isr_regi)	; Store phrase 1 high dword
 			store	isr_reg2, (isr_regi+1)	; Store phrase 1 low dword
 			store	isr_reg0, (isr_regi+5)	; Store phrase 3 low dword
+
+			; Now update the first phrase of the game list bitmap object
+			movei	#glbmupdate, isr_reg0
+			load	(isr_reg0), isr_reg1
+			addq	#4, isr_reg0
+			load	(isr_reg0), isr_reg2
+
+			movei	#listbuf+BMGAMELST_OFF, isr_reg0
+
+			store	isr_reg1, (isr_reg0)
+			addq	#4, isr_reg0
+			store	isr_reg2, (isr_reg0)
 
 			; Increment _ticks
 			movei	#_ticks, isr_reg4
@@ -360,6 +460,6 @@ gpucodex:
 			.long
 
 _gpusem:	.ds.w	1
-gpustop:	.ds.w	1
+gpucmd:		.ds.w	1
 
 			.end

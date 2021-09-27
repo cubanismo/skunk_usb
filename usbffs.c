@@ -9,6 +9,7 @@
 #include "ffs/diskio.h"
 
 extern unsigned long testgpu(void);
+extern void showgl(int show);
 extern unsigned short doscale;
 extern unsigned long ticks;
 
@@ -281,12 +282,19 @@ void start(void) {
 			doscale = !doscale;
 		} else if (!strcmp("getticks", input)) {
 			printf("ticks = %u\n", ticks);
+		} else if (!strcmp("showlist", input)) {
+			showgl(1);
+		} else if (!strcmp("hidelist", input)) {
+			showgl(0);
+		} else if (!strcmp("clearlist", input)) {
+			clrgamelst();
 		} else {
 			printf("Invalid command\n");
 		}
 	}
 done:
 	f_unmount(DRIVE);
+	stopgpu();
 	printf("Exiting\n");
 	skunkCONSOLECLOSE();
 }
