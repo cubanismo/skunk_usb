@@ -9,6 +9,16 @@
 			.globl	_testgpu
 			.globl	_stopgpu
 			.globl	_clrgamelst
+			.globl	_drawstring
+			.globl	_fontdata
+
+; These are all hard-coded from the clr6x12.jft font for now.
+CHR_WIDTH	.equ	6
+CHR_PITCH	.equ	8
+CHR_HEIGHT	.equ	12
+FNTWIDTH	.equ	WID768
+FNTFIRSTCHR	.equ	$20
+FNTLASTCHR	.equ	$7f
 
 gpustack	.equ	G_RAM+4096
 
@@ -78,6 +88,16 @@ _clrgamelst: ; Tell the GPU to clear gamelstbm
 
 			rts
 
+_drawstring: ; Draw a string
+			move.l	4(sp), fontaddr	; Param 0: font data address
+			move.l	8(sp), stringaddr	; Param 1: NUL-terminated string address
+			move.w	#GCMD_DRAWSTRING, gpucmd
+
+.waitgpu:	cmpi.w	#0, gpucmd			; Wait for the GPU to finish the cmd
+			bne		.waitgpu
+
+			rts
+
 			.phrase
 gpucode:
 			.gpu
@@ -99,6 +119,7 @@ rgpucmd		.equr	r13
 ; The GPU code will recognize these commands when stored in gpucmd
 GCMD_STOP		.equ	1
 GCMD_CLRLIST	.equ	2
+GCMD_DRAWSTRING	.equ	3
 
 ;;
 ;; Each GPU interrupt vector entry is 16 bytes (8 16-bit words)
@@ -219,8 +240,15 @@ infinite:	loadw	(rgpucmd), r1
 
 			movei	#clrlist, r0
 			jump	(r0)
-
 .notclrlist:
+			cmpq	#GCMD_DRAWSTRING, r1
+			jr		NE, .notdrawstring
+			nop
+
+			movei	#drawstring, r0
+			jump	(r0)
+
+.notdrawstring:
 			; Unknown command. Clear it and continue.
 			moveq	#0, r1
 			storew	r1, (rgpucmd)
@@ -299,6 +327,106 @@ clrlist:	; Clear the game list bitmap
 
 			; Done. Clear the command and return to the message loop
 			moveq	#0, r1
+			storew	r1, (rgpucmd)
+			movei	#infinite, r0
+			jump	(r0)
+			nop
+
+drawstring:	; Write a NUL-terminated string to the game list
+			;  fontaddr:   Pointer to the 1bpp font surface
+			;  stringaddr: Pointer to the NUL-terminated string
+			;  gamelstbm:  The surface to draw to
+			;  TODO: Add a parameter for the (x,y) coordinate to start at
+			moveq	#0, r0				; 0 will be stored in various fields
+
+			movei	#gamelstbm, r1
+			movei	#A1_BASE, r2
+
+			movei	#A1_CLIP, r3
+
+			store	r1, (r2)			; Store A1_BASE (destination addr)
+			store	r0, (r3)			; Store 0 in A1_CLIP (No clipping)
+
+			.assert GL_WIDTH = 192
+			movei	#PITCH1|PIXEL1|WID192|XADDPIX|YADD0, r4
+			movei	#A1_FLAGS, r5
+
+			movei	#A1_FPIXEL, r7
+
+			; Add (-CHR_WIDTH, 1) to dst x, y pointers after each inner loop iter
+			;movei	#(1<<16)|((-CHR_WIDTH)&$ffff), r8
+			movei	#(1<<16)|((-CHR_PITCH)&$ffff), r8
+			movei	#A1_STEP, r9
+			movei	#A1_FSTEP, r10
+
+			store	r4, (r5)			; Store A1_FLAGS
+			store	r0, (r7)			; Store 0 in A1_FPIXEL
+			store	r8, (r9)			; Store (-CHR_WIDTH, 1) in A1_STEP
+			store	r0, (r10)			; Store 0 in A1_FSTEP
+
+			movei	#fontaddr, r4
+			movei	#A2_BASE, r5
+			movei	#PITCH1|PIXEL1|FNTWIDTH|XADDPIX|YADD0, r6
+			load	(r4), r10			; Get address of font in r10
+			movei	#A2_FLAGS, r7
+			movei	#A2_STEP, r9
+
+			store	r10, (r5)			; Store *fontaddr in A2_BASE
+			store	r6, (r7)			; Store A2_FLAGS
+			store	r8, (r9)			; Store (-CHR_WIDTH, 1) in A2_STEP
+
+			;movei	#-CHR_WIDTH, r1		; XXX TODO: Load 1st dst pixel location
+			move	r0, r1				; XXX TODO: Load 1st dst pixel location
+			movei	#A1_PIXEL, r2
+			;movei	#(CHR_HEIGHT<<16)|CHR_WIDTH, r3
+			movei	#(CHR_HEIGHT<<16)|CHR_PITCH, r3
+			movei	#B_COUNT, r4
+			;              1bit pixels need DSTEN
+			movei	#SRCEN|DSTEN|UPDA1|UPDA2|LFU_REPLACE, r5; r5 = B_CMD val
+			movei	#B_CMD, r6
+			movei	#stringaddr, r11	; Load string pointer in r11
+			movei	#FNTFIRSTCHR, r8	; Load first char idx of font in r8
+			load	(r11), r12			; Load string address in r12
+			movei	#A2_PIXEL, r10
+.nextchr1:	loadb	(r12), r7			; Load first byte of string in r7
+			;addq	#CHR_WIDTH, r1		; Add CHR_WIDTH to dst pixel location
+			cmpq	#0, r7
+			jr		NE, .notdone		; Done if string is empty
+			moveq	#CHR_PITCH, r9		; Note: Executed even when jumping
+			storew	r0, (rgpucmd)		; Done. Clear GPU cmd, reenter msg loop
+			movei	#infinite, r0
+			jump	(r0)
+
+.notdone:	sub		r8, r7
+			addqt	#1, r12				; Always advance string pointer
+			jr		MI, .nextchr1		; If chr out of range, leave blank space
+			imult	r9, r7				; Multiply chr idx by CHR_PITCH
+
+.blitloop:	store	r7, (r10)			; Store src pixel loc in A2_PIXEL
+			store	r1, (r2)			; Store dst pixel loc in A1_PIXEL
+			store	r3, (r4)			; Write loop dimensions to B_COUNT
+			store	r5, (r6)			; Write op to B_CMD
+
+.nextchr2:	loadb	(r12), r7			; Load next character
+			addq	#CHR_WIDTH, r1		; Add CHR_WIDTH to dst pixel location
+			cmpq	#0, r7				; At NUL terminator?
+			jr		EQ, .waitlast		; if yes, wait for the last blit
+			sub		r8, r7				; Subtract font first chr from character
+			addqt	#1, r12				; Always advance string pointer
+			jr		MI, .nextchr2		; If chr out of range, leave blank space
+			imult	r9, r7				; Multiply chr idx by CHR_PITCH
+
+.waitblit:	load	(r4), r0			; Read back blit status
+			btst	#0, r0				; See if bit 0 is set
+			jr		EQ, .blitloop		; If done, next iteration
+			nop
+			jr		.waitblit			; Else, keep waiting
+
+.waitlast:	; Done. Wait for the last blit, clear GPU cmd, return to msg loop
+			load	(r4), r0			; Read back blit status
+			btst	#0, r0				; See if bit 0 is set
+			jr		NE, .waitlast
+.done:		moveq	#0, r1				; Note: Executed every iteration
 			storew	r1, (rgpucmd)
 			movei	#infinite, r0
 			jump	(r0)
@@ -456,9 +584,17 @@ gpuopint:
 			.68000
 gpucodex:
 
+			.data
+			.phrase
+
+clr6x12fnt:	.incbin "clr6x12.jft"
+_fontdata	.equ	(clr6x12fnt+8)		; Font data is after 1 phrase header
+
 			.bss
 			.long
 
+fontaddr:	.ds.l	1
+stringaddr:	.ds.l	1
 _gpusem:	.ds.w	1
 gpucmd:		.ds.w	1
 

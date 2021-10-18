@@ -288,6 +288,8 @@ void start(void) {
 			showgl(0);
 		} else if (!strcmp("clearlist", input)) {
 			clrgamelst();
+		} else if (!strcmp("drawstring", input)) {
+			drawstring(fontdata, "W");
 		} else {
 			printf("Invalid command\n");
 		}
