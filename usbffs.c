@@ -150,7 +150,10 @@ static void flash(const char *file) {
 }
 
 static void ls(void) {
+	unsigned coord = 0;
 	FRESULT res;
+
+	clrgamelst();
 
 	res = f_opendir(&dir, cwd);
 	if (res != FR_OK) {
@@ -168,6 +171,9 @@ static void ls(void) {
 		if (fi.fname[0] == 0) {
 			break;
 		}
+
+		drawstring(gamelstbm, coord, fi.fname);
+		coord += (12 << 16);
 
 		printf("%s%s\n", fi.fname, (fi.fattrib & AM_DIR) ? "/" : "");
 	}
@@ -250,8 +256,6 @@ void start(void) {
 	}
 
 	sprintf(cwd, "0:/");
-
-	ls();
 
 	while (1) {
 		memset(input, 0, sizeof(input));
