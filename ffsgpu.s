@@ -10,6 +10,7 @@
 			.globl	_stopgpu
 			.globl	_clrgamelst
 			.globl	_drawstring
+			.globl	_invertrect
 
 ; These are all hard-coded from the clr6x12.jft font for now.
 CHR_WIDTH	.equ	6
@@ -18,7 +19,7 @@ FNTWIDTH	.equ	WID96				; WID768 / 8 per comment in drawstring
 FNTFIRSTCHR	.equ	$20
 FNTLASTCHR	.equ	$7f
 
-gpustack	.equ	G_RAM+4096
+gpustack	.equ	G_ENDRAM
 
 			.68000
 			.text
@@ -32,7 +33,7 @@ _startgpu:
 
 			move.l	#0, A1_CLIP			; Don't clip blitter writes
 
-			move.l	#G_RAM, A1_BASE		; destination
+			move.l	#G_RAM+$8000, A1_BASE	; destination = 32b view of G_RAM
 			move.l	#gpucode, A2_BASE	; source
 
 			move.l	#XADDPHR|PIXEL32|WID2048|PITCH1, A1_FLAGS
@@ -97,6 +98,17 @@ _drawstring: ; Draw a string
 
 			rts
 
+_invertrect: ; Invert a rectangle of 1bpp pixels
+			move.l	4(sp), surfaddr	; Param 0: font data address
+			move.l	8(sp), coords	; Param 1: coordinates, packed as (y<<16)|x
+			move.l	12(sp), size	; Param 2: rect size, packedas (h<<16|w)
+			move.w	#GCMD_INVERTRECT, gpucmd
+
+.waitgpu:	cmpi.w	#0, gpucmd			; Wait for the GPU to finish the cmd
+			bne		.waitgpu
+
+			rts
+
 			.phrase
 gpucode:
 			.gpu
@@ -119,6 +131,7 @@ rgpucmd		.equr	r13
 GCMD_STOP		.equ	1
 GCMD_CLRLIST	.equ	2
 GCMD_DRAWSTRING	.equ	3
+GCMD_INVERTRECT	.equ	4
 
 ;;
 ;; Each GPU interrupt vector entry is 16 bytes (8 16-bit words)
@@ -248,6 +261,15 @@ infinite:	loadw	(rgpucmd), r1
 			jump	(r0)
 
 .notdrawstring:
+			cmpq	#GCMD_INVERTRECT, r1
+			jr		NE, .notinvertrect
+			nop
+
+			movei	#invertrect, r0
+			jump	(r0)
+			nop
+
+.notinvertrect:
 			; Unknown command. Clear it and continue.
 			moveq	#0, r1
 			storew	r1, (rgpucmd)
@@ -342,7 +364,6 @@ drawstring:	; Write a NUL-terminated string to the game list
 			movei	#A1_BASE, r2
 
 			load	(r6), r1			; Load dst surface address into r1
-			;movei	#_gamelstbm, r1
 
 			movei	#A1_CLIP, r3
 			movei	#$ffffffff, r4
@@ -443,6 +464,58 @@ drawstring:	; Write a NUL-terminated string to the game list
 .done:		storew	r0, (rgpucmd)
 			movei	#infinite, r11
 			jump	(r11)
+			nop
+
+invertrect:	; Invert a 1bpp rectangle of pixels
+			;  surfaddr:   The  surface to draw to
+			;  coords:     The packed start coordinates (y<<16)|x
+			;  size:       The packed rect size (y<<16)|x
+			moveq	#0, r0				; 0 will be stored in various fields
+
+			movei	#surfaddr, r6		; Surface address pointer -> r6
+			movei	#A1_BASE, r2
+
+			load	(r6), r1			; Load dst surface address into r1
+
+			movei	#A1_CLIP, r3
+			.assert GL_WIDTH = 192
+			movei	#PITCH1|PIXEL1|WID192|XADDPIX|YADD0, r4
+			movei	#A1_FLAGS, r5
+			movei	#coords, r6
+			movei	#A1_FPIXEL, r7
+			load	(r6), r8
+			movei	#A1_PIXEL, r9
+
+			; Add (-GL_WIDTH, 1) to x, y pointers after each inner loop iter
+			movei	#(1<<16)|((-GL_WIDTH)&$ffff), r6
+			movei	#A1_STEP, r10
+			movei	#size, r11
+			movei	#A1_FSTEP, r12
+			load	(r11), r14			; Load size -> r14
+			movei	#B_COUNT, r16
+			movei	#DSTEN|UPDA1|LFU_NOTD, r17	; 1bit pixels need DSTEN
+			movei	#B_CMD, r18
+
+			store	r1, (r2)			; Store surfaddr in A1_BASE
+			store	r0, (r3)			; Store 0,0 in A1_CLIP (No clipping)
+			store	r4, (r5)			; Store A1_FLAGS data
+			store	r0, (r7)			; Store 0,0 A1_FPIXEL
+			store	r8, (r9)			; store coords in A1_PIXEL
+			store	r6, (r10)			; store (-GL_WIDTH, 1) in A1_STEP
+			store	r0, (r12)			; Store 0,0 in A1_FSTEP
+			store	r14, (r16)			; Store size in B_COUNT
+			store	r17, (r18)			; Write op to B_CMD
+
+.waitblit:
+			load	(r18), r0			; Read back blit status
+			btst	#0, r0				; See if bit 0 is set
+			jr		EQ, .waitblit
+
+			; Done. Clear the command and return to the message loop
+			moveq	#0, r1
+			storew	r1, (rgpucmd)
+			movei	#infinite, r0
+			jump	(r0)
 			nop
 
 gpucpuint:
@@ -597,6 +670,8 @@ gpuopint:
 			.68000
 gpucodex:
 
+.print "gpucode size: ",/u/w (gpucodex-gpucode), " bytes."
+
 			.data
 			.phrase
 
@@ -608,6 +683,7 @@ fontdata	.equ	(clr6x12fnt+8)		; Font data is after 1 phrase header
 
 surfaddr:	.ds.l	1
 coords:		.ds.l	1
+size:		; Alias stringaddr
 stringaddr:	.ds.l	1
 _gpusem:	.ds.w	1
 gpucmd:		.ds.w	1

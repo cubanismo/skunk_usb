@@ -149,10 +149,47 @@ static void flash(const char *file) {
 	printf("Flashing complete\n");
 }
 
+enum {
+	SELECT_CLR		= 0x0001,
+	SELECT_DRAW		= 0x0002,
+	SELECT_ADD		= 0x0004,
+	SELECT_SET		= 0x0008,
+	SELECT_VAL_MASK	= SELECT_ADD | SELECT_SET,
+} SelectOps;
+
+static void select(unsigned short op, short val) {
+	static int selection = -1;
+	if ((selection >= 0) && (op & SELECT_CLR)) {
+		invertrect(gamelstbm,
+				   ((selection * FNTHEIGHT) << 16) | 0,
+				   (FNTHEIGHT << 16) | GL_WIDTH);
+	}
+
+	switch (op & SELECT_VAL_MASK) {
+	case SELECT_ADD:
+		selection += val;
+		break;
+	case SELECT_SET:
+		selection = val;
+		break;
+
+	default:
+		printf("Invalid selection val operation: 0x%x\n", op & SELECT_VAL_MASK);
+		break;
+	}
+
+	if ((selection >= 0) && (op & SELECT_DRAW)) {
+		invertrect(gamelstbm,
+				   ((selection * FNTHEIGHT) << 16) | 0,
+				   (FNTHEIGHT << 16) | GL_WIDTH);
+	}
+}
+
 static void ls(void) {
 	unsigned coord = 0;
 	FRESULT res;
 
+	select(SELECT_SET, -1);
 	clrgamelst();
 
 	res = f_opendir(&dir, cwd);
@@ -182,8 +219,9 @@ done:
 	res = f_closedir(&dir);
 	if (res != FR_OK) {
 		printf("Failed to close dir: %s\n", fresToStr(res));
-		goto done;
 	}
+
+	select(SELECT_DRAW | SELECT_SET, 0);
 }
 
 static void pwd(void) {
@@ -295,6 +333,10 @@ void start(void) {
 		} else if (!strcmp("drawstring", input)) {
 			drawstring(gamelstbm, (0 << 16) | 0, "Hello you big, beautiful world!");
 			drawstring(gamelstbm, (12 << 16) | 0, "12345678901234567890");
+		} else if (!strcmp("next", input)) {
+			select(SELECT_CLR|SELECT_DRAW|SELECT_ADD, 1);
+		} else if (!strcmp("prev", input)) {
+			select(SELECT_CLR|SELECT_DRAW|SELECT_ADD, -1);
 		} else {
 			printf("Invalid command\n");
 		}
