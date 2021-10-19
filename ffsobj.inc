@@ -27,7 +27,7 @@ GL_PHRASES		.equ	(GL_WIDTH/PPP1B)
 				.extern deltat
 				.extern	deltas
 				.extern scalespeed
-				.extern	gamelstbm
+				.extern	_gamelstbm
 
 ; Globals Functions:
 				.extern	InitGPUOP

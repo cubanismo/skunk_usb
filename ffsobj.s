@@ -30,7 +30,7 @@
 		.globl	_ticks
 		.globl	deltas
 		.globl	scalespeed
-		.globl	gamelstbm
+		.globl	_gamelstbm
 
 		.68000
 		.text
@@ -187,7 +187,7 @@ InitLister:
 			lsl.w   #3, d4
 			or.w    d4, d1				; Stuff YPOS in low phrase
 
-			move.l	#gamelstbm, d4
+			move.l	#_gamelstbm, d4
 			lsl.l	#8, d4				; Assumes phrase-aligned buffer, so no
 			or.l	d4, d0				; masking of lower bits is needed here.
 
@@ -276,7 +276,7 @@ _doscale:	.ds.w	1
 scalespeed:	.ds.w	1
 
 			.phrase
-gamelstbm:	.ds.b	(GL_WIDTH/8)*GL_HEIGHT	; (width/(8 pixels per byte))*height
+_gamelstbm:	.ds.b	(GL_WIDTH/8)*GL_HEIGHT	; (width/(8 pixels per byte))*height
 
 			.data
 			.phrase

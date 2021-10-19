@@ -289,7 +289,8 @@ void start(void) {
 		} else if (!strcmp("clearlist", input)) {
 			clrgamelst();
 		} else if (!strcmp("drawstring", input)) {
-			drawstring(fontdata, "W");
+			drawstring(gamelstbm, (0 << 16) | 0, "Hello you big, beautiful world!");
+			drawstring(gamelstbm, (12 << 16) | 0, "12345678901234567890");
 		} else {
 			printf("Invalid command\n");
 		}

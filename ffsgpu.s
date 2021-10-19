@@ -10,7 +10,6 @@
 			.globl	_stopgpu
 			.globl	_clrgamelst
 			.globl	_drawstring
-			.globl	_fontdata
 
 ; These are all hard-coded from the clr6x12.jft font for now.
 CHR_WIDTH	.equ	6
@@ -79,7 +78,7 @@ _stopgpu:	; Tell the GPU to stop
 
 			rts
 
-_clrgamelst: ; Tell the GPU to clear gamelstbm
+_clrgamelst: ; Tell the GPU to clear _gamelstbm
 			move.w	#GCMD_CLRLIST, gpucmd
 
 .waitgpu:	cmpi.w	#0, gpucmd			; Wait for the GPU to finish the clear
@@ -88,8 +87,9 @@ _clrgamelst: ; Tell the GPU to clear gamelstbm
 			rts
 
 _drawstring: ; Draw a string
-			move.l	4(sp), fontaddr	; Param 0: font data address
-			move.l	8(sp), stringaddr	; Param 1: NUL-terminated string address
+			move.l	4(sp), surfaddr	; Param 0: font data address
+			move.l	8(sp), coords	; Param 1: coordinates, packed as (y<<16)|x
+			move.l	12(sp), stringaddr	; Param 2: NUL-terminated string address
 			move.w	#GCMD_DRAWSTRING, gpucmd
 
 .waitgpu:	cmpi.w	#0, gpucmd			; Wait for the GPU to finish the cmd
@@ -282,7 +282,7 @@ stopgpu:	; Park the OLP on a stop object
 clrlist:	; Clear the game list bitmap
 			moveq	#0, r0				; 0 will be stored in various fields
 
-			movei	#gamelstbm, r1
+			movei	#_gamelstbm, r1
 			movei	#A1_BASE, r2
 
 			movei	#A1_CLIP, r3
@@ -332,14 +332,17 @@ clrlist:	; Clear the game list bitmap
 			nop
 
 drawstring:	; Write a NUL-terminated string to the game list
-			;  fontaddr:   Pointer to the 1bpp font surface
+			;  surfaddr:   The  surface to draw to
+			;  coords:     The packed coordinates (y<<16)|x
 			;  stringaddr: Pointer to the NUL-terminated string
-			;  gamelstbm:  The surface to draw to
-			;  TODO: Add a parameter for the (x,y) coordinate to start at
+			;  fontdata:   The 1bpp font surface
 			moveq	#0, r0				; 0 will be stored in various fields
 
-			movei	#gamelstbm, r1
+			movei	#surfaddr, r6		; Surface address pointer -> r6
 			movei	#A1_BASE, r2
+
+			load	(r6), r1			; Load dst surface address into r1
+			;movei	#_gamelstbm, r1
 
 			movei	#A1_CLIP, r3
 			movei	#$ffffffff, r4
@@ -367,8 +370,9 @@ drawstring:	; Write a NUL-terminated string to the game list
 			store	r8, (r9)			; Store (-CHR_WIDTH, 1) in A1_STEP
 			store	r0, (r10)			; Store 0 in A1_FSTEP
 
-			movei	#fontaddr, r4
+			movei	#fontdata, r4
 			movei	#A2_BASE, r5
+			movei	#coords, r11
 			; Use PIXEL8 even though we're reading 1bit pixels. This, combined
 			; with the below SRCENX + !SRCEN command, FNTWIDTH set to actual
 			; divided by 8, fixed A2_STEP of -1, 1, and blit width of at most 8
@@ -382,16 +386,15 @@ drawstring:	; Write a NUL-terminated string to the game list
 			; clamped to 8 bits/1 byte given source data is only read once. This
 			; case is not implemented here.
 			movei	#PITCH1|PIXEL8|FNTWIDTH|XADDPIX|YADD0, r6
-			load	(r4), r10			; Get address of font in r10
 			movei	#A2_FLAGS, r7
 			movei	#(1<<16)|((-1)&$ffff), r8
 			movei	#A2_STEP, r9
 
-			store	r10, (r5)			; Store *fontaddr in A2_BASE
+			store	r4, (r5)			; Store fontdata in A2_BASE
 			store	r6, (r7)			; Store A2_FLAGS
 			store	r8, (r9)			; Store (-1, 1) in A2_STEP
 
-			movei	#-CHR_WIDTH, r1		; XXX TODO: Load 1st dst pixel location
+			load	(r11), r1			; Load 1st dst pixel location in r1
 			movei	#A1_PIXEL, r2
 			movei	#(CHR_HEIGHT<<16)|CHR_WIDTH, r3
 			movei	#B_COUNT, r4
@@ -415,9 +418,9 @@ drawstring:	; Write a NUL-terminated string to the game list
 			store	r1, (r2)			; Store dst pixel loc in A1_PIXEL
 			store	r3, (r4)			; Write loop dimensions to B_COUNT
 			store	r5, (r6)			; Write op to B_CMD
+			addq	#CHR_WIDTH, r1		; Add CHR_WIDTH to dst pixel location
 
 .nextchr:	loadb	(r12), r7			; Load next character
-			addq	#CHR_WIDTH, r1		; Add CHR_WIDTH to dst pixel location
 			cmpq	#0, r7				; At NUL terminator?
 			jr		EQ, .waitlast		; if yes, wait for the last blit
 			cmp		r9, r7				; Compare to last char
@@ -598,12 +601,13 @@ gpucodex:
 			.phrase
 
 clr6x12fnt:	.incbin "clr6x12.jft"
-_fontdata	.equ	(clr6x12fnt+8)		; Font data is after 1 phrase header
+fontdata	.equ	(clr6x12fnt+8)		; Font data is after 1 phrase header
 
 			.bss
 			.long
 
-fontaddr:	.ds.l	1
+surfaddr:	.ds.l	1
+coords:		.ds.l	1
 stringaddr:	.ds.l	1
 _gpusem:	.ds.w	1
 gpucmd:		.ds.w	1
