@@ -470,7 +470,7 @@ drawstring:	; Write a NUL-terminated string to the game list
 			jr		.waitblit			; Else, keep waiting
 
 .waitlast:	; Done. Wait for the last blit...
-			load	(r4), r11			; In both loops: Read back blit status
+			load	(r6), r11			; In both loops: Read back blit status
 			btst	#0, r11				; See if bit 0 is set
 			jr		EQ, .waitlast
 			nop							; Don't signal completion while spinning
