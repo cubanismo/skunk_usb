@@ -432,8 +432,13 @@ drawstring:	; Write a NUL-terminated string to the game list
 			movei	#A1_PIXEL, r2
 			movei	#(CHR_HEIGHT<<16)|CHR_WIDTH, r3
 			movei	#B_COUNT, r4
-			; r5 = B_CMD value
-			; Notes:
+
+			; The blit loop always starts by adding CHR_WIDTH to the dst
+			; position. Subtract CHR_WIDTH from the initial position to account
+			; for this.
+			subq	#CHR_WIDTH, r1
+
+			; r5 = B_CMD value. Notes:
 			;  -1bit pixels need DSTEN,
 			;  -SRCENX means read a pixel from src on first inner loop iteration
 			;  -!SRCEN means no pixels read on other inner loop iterations
@@ -453,9 +458,9 @@ drawstring:	; Write a NUL-terminated string to the game list
 			store	r1, (r2)			; Store dst pixel loc in A1_PIXEL
 			store	r3, (r4)			; Write loop dimensions to B_COUNT
 			store	r5, (r6)			; Write op to B_CMD
-			addq	#CHR_WIDTH, r1		; Add CHR_WIDTH to dst pixel location
 
-.nextchr:	loadb	(r12), r7			; Load next character
+.nextchr:	addq	#CHR_WIDTH, r1		; Add CHR_WIDTH to dst pixel location
+			loadb	(r12), r7			; Load next character
 			cmpq	#0, r7				; At NUL terminator?
 			jr		EQ, .waitlast		; if yes, wait for the last blit
 			cmp		r9, r7				; Compare to last char

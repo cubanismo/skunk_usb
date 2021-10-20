@@ -15,31 +15,36 @@ DUMPOBJS = usbdump.o skunk.o
 
 VERIFOBJS = usbverif.o skunk.o
 
+COMMONGFXOBJS = ffsgpu.o ffsobj.o
+
+GFXOBJS = testgfx.o
+
 FFSSTART = startffs.o
-FFSOBJS = ffsobj.o \
-	ffs/ff.o \
+FFSOBJS = ffs/ff.o \
 	ffs/ffunicode.o \
 	usbffs.o \
 	string.o \
 	skunk.o \
-	flash.o \
-	ffsgpu.o
+	flash.o
 
 OBJS = $(COMMONOBJS) \
+	$(COMMONGFXOBJS) \
 	$(COMMONSTART) \
 	$(TESTOBJS) \
 	$(DUMPOBJS) \
 	$(FFSOBJS) \
-	$(FFSSTART)
+	$(FFSSTART) \
+	$(GFXOBJS)
 
 TESTCOF = testdrv.cof
 DUMPCOF = usbdump.cof
 VERIFCOF = usbverif.cof
 FFSCOF = usbffs.cof
+GFXCOF = testgfx.cof
 
 include $(JAGSDK)/jaguar/skunk/skunk.mk
 
-PROGS = $(TESTCOF) $(DUMPCOF) $(VERIFCOF) $(FFSCOF)
+PROGS = $(TESTCOF) $(DUMPCOF) $(VERIFCOF) $(FFSCOF) $(GFXCOF)
 
 $(TESTCOF): $(COMMONSTART) $(COMMONOBJS) $(TESTOBJS)
 	$(LINK) $(LINKFLAGS) -o $@ $^
@@ -50,7 +55,10 @@ $(DUMPCOF): $(COMMONSTART) $(COMMONOBJS) $(DUMPOBJS)
 $(VERIFCOF): $(COMMONSTART) $(COMMONOBJS) $(VERIFOBJS)
 	$(LINK) $(LINKFLAGS) -o $@ $^
 
-$(FFSCOF): $(FFSSTART) $(FFSOBJS) $(COMMONOBJS)
+$(FFSCOF): $(FFSSTART) $(FFSOBJS) $(COMMONGFXOBJS) $(COMMONOBJS)
+	$(LINK) $(LINKFLAGS) -o $@ $^
+
+$(GFXCOF): $(FFSSTART) $(GFXOBJS) $(COMMONGFXOBJS)
 	$(LINK) $(LINKFLAGS) -o $@ $^
 
 skunkc.o: $(SKUNKDIR)/lib/skunkc.s
