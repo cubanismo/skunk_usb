@@ -50,6 +50,9 @@ _startgpu:
 			andi.l	#1, d0
 			beq		.waitblit
 
+			move.l	#gputocpuint, LEVEL0	; Install GPU->CPU interrupt handler
+			move.w	#C_GPUENA, INT1		; Enable the GPU interrupt
+
 			clr.w	gpucmd				; Clear the gpucmd message
 			clr.w	_gpusem				; Initialize the GPU semaphore
 			move.l	#gpuinit, G_PC		; Start the GPU init code
@@ -81,33 +84,40 @@ _stopgpu:	; Tell the GPU to stop
 
 _clrgamelst: ; Tell the GPU to clear _gamelstbm
 			move.w	#GCMD_CLRLIST, gpucmd
-
-.waitgpu:	cmpi.w	#0, gpucmd			; Wait for the GPU to finish the clear
-			bne		.waitgpu
-
-			rts
+			jmp		waitgpu
 
 _drawstring: ; Draw a string
 			move.l	4(sp), surfaddr	; Param 0: font data address
 			move.l	8(sp), coords	; Param 1: coordinates, packed as (y<<16)|x
 			move.l	12(sp), stringaddr	; Param 2: NUL-terminated string address
+
 			move.w	#GCMD_DRAWSTRING, gpucmd
-
-.waitgpu:	cmpi.w	#0, gpucmd			; Wait for the GPU to finish the cmd
-			bne		.waitgpu
-
-			rts
+			jmp		waitgpu
 
 _invertrect: ; Invert a rectangle of 1bpp pixels
 			move.l	4(sp), surfaddr	; Param 0: font data address
 			move.l	8(sp), coords	; Param 1: coordinates, packed as (y<<16)|x
 			move.l	12(sp), size	; Param 2: rect size, packedas (h<<16|w)
+
 			move.w	#GCMD_INVERTRECT, gpucmd
+			jmp		waitgpu
 
-.waitgpu:	cmpi.w	#0, gpucmd			; Wait for the GPU to finish the cmd
-			bne		.waitgpu
-
+waitgpu:	stop	#$2000			; Enable 68k interrupt then halt
+			;
+			; An interrupt will resume the 68k on the next instr after the
+			; appropriate interrupt handler runs.
+			;
+			move.w	#$2700, sr		; Disable 68k interrupts
 			rts
+
+; 68k Interrupt handler. Doesn't need to do anything but clear the interrupt
+; bits. The only interrupt enabled in INT1 should be the GPU one, and its only
+; purpose is to bring the 68k out of the STOP state when the GPU is done with
+; some work.
+gputocpuint:
+			move.w	#C_GPUCLR|C_GPUENA, INT1	; Clear GPU interrupt
+			move.w	#0, INT2					; Lower 68k bus priority
+			rte
 
 			.phrase
 gpucode:
@@ -346,12 +356,15 @@ clrlist:	; Clear the game list bitmap
 			btst	#0, r0				; See if bit 0 is set
 			jr		EQ, .waitblit
 
-			; Done. Clear the command and return to the message loop
+			; Done. Clear command, interrupt 68k, and return to main loop
 			moveq	#0, r1
-			storew	r1, (rgpucmd)
+			movei	#G_CTRL, r2
 			movei	#infinite, r0
-			jump	(r0)
-			nop
+			load	(r2), r3		; Load G_CTRL into r3
+			storew	r1, (rgpucmd)	; Clear gpucmd
+			bset	#1, r3			; Set CPUINT bit in r3
+			jump	(r0)			; Jump back to main loop
+			store	r3, (r2)		; Write G_CTRL, causing 68k interrupt
 
 drawstring:	; Write a NUL-terminated string to the game list
 			;  surfaddr:   The  surface to draw to
@@ -432,8 +445,9 @@ drawstring:	; Write a NUL-terminated string to the game list
 			movei	#FNTLASTCHR, r9		; Load last char idx of font in r9
 			movei	#A2_PIXEL, r10
 
-			jr		.nextchr			; Jump into loop
 			load	(r11), r12			; Load string address in r12
+			jr		.nextchr			; Jump into loop
+			xor		r11, r11			; clear r11
 
 .blitloop:	store	r7, (r10)			; Store src pixel loc in A2_PIXEL
 			store	r1, (r2)			; Store dst pixel loc in A1_PIXEL
@@ -449,22 +463,26 @@ drawstring:	; Write a NUL-terminated string to the game list
 			jr		HI, .nextchr		; If chr out of range, leave blank space
 			sub		r8, r7				; Subtract font first chr from character
 			jr		MI, .nextchr		; If chr out of range, leave blank space
-			load	(r4), r11			; (Always) Read back blit status
+			nop
 .waitblit:	btst	#0, r11				; See if bit 0 is set
 			jr		NE, .blitloop		; If done, next iteration
-			nop
+			xor		r11, r11			; Clear r11 for next iteration
 			jr		.waitblit			; Else, keep waiting
 
-.waitlast:	; Done. Wait for the last blit, clear GPU cmd, return to msg loop
+.waitlast:	; Done. Wait for the last blit...
 			load	(r4), r11			; In both loops: Read back blit status
 			btst	#0, r11				; See if bit 0 is set
 			jr		EQ, .waitlast
 			nop							; Don't signal completion while spinning
 
-.done:		storew	r0, (rgpucmd)
-			movei	#infinite, r11
-			jump	(r11)
-			nop
+.done:		; ... then clear command, interrupt 68k, and return to main loop
+			storew	r0, (rgpucmd)	; Clear gpucmd
+			movei	#G_CTRL, r2
+			load	(r2), r3		; Load G_CTRL into r3
+			movei	#infinite, r0
+			bset	#1, r3			; Set CPUINT bit in r3
+			jump	(r0)			; Jump back to main loop
+			store	r3, (r2)		; Write G_CTRL, causing 68k interrupt
 
 invertrect:	; Invert a 1bpp rectangle of pixels
 			;  surfaddr:   The  surface to draw to
@@ -511,12 +529,15 @@ invertrect:	; Invert a 1bpp rectangle of pixels
 			btst	#0, r0				; See if bit 0 is set
 			jr		EQ, .waitblit
 
-			; Done. Clear the command and return to the message loop
+			; Done. Clear command, interrupt 68k, and return to main loop
 			moveq	#0, r1
-			storew	r1, (rgpucmd)
+			movei	#G_CTRL, r2
 			movei	#infinite, r0
-			jump	(r0)
-			nop
+			load	(r2), r3		; Load G_CTRL into r3
+			storew	r1, (rgpucmd)	; Clear gpucmd
+			bset	#1, r3			; Set CPUINT bit in r3
+			jump	(r0)			; Jump back to main loop
+			store	r3, (r2)		; Write G_CTRL, causing 68k interrupt
 
 gpucpuint:
 			; Test code: Just increment a 16-bit counter by two
