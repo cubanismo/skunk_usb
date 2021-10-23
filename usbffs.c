@@ -24,6 +24,7 @@ static FATFS fs;
 static DIR dir;
 static FILINFO fi;
 static FIL f;
+static BYTE consoleBusy = 0;
 
 DSTATUS disk_initialize(BYTE pdrv)
 {
@@ -213,7 +214,9 @@ static void ls(void) {
 		drawstring(gamelstbm, coord, fi.fname);
 		coord += (12 << 16);
 
-		printf("%s%s\n", fi.fname, (fi.fattrib & AM_DIR) ? "/" : "");
+		if (!consoleBusy) {
+			printf("%s%s\n", fi.fname, (fi.fattrib & AM_DIR) ? "/" : "");
+		}
 	}
 
 done:
@@ -269,7 +272,6 @@ static void cd(const char *newdir) {
 
 	f_closedir(&dir);
 	memcpy(cwd, path, chars + 1);
-	pwd();
 }
 
 #define DRIVE "0"
@@ -299,8 +301,14 @@ void start(void) {
 	sprintf(cwd, "0:/");
 
 	while (1) {
+		if (!skunkCONSOLESETUPREAD()) break;
+		consoleBusy = 1;
 		memset(input, 0, sizeof(input));
-		skunkCONSOLEREAD(input, sizeof(input) - 1);
+		while (!skunkCONSOLECHECKREAD()) {
+			/* Handle joystick events here */
+		}
+		skunkCONSOLEFINISHREAD(input, sizeof(input) - 1);
+		consoleBusy = 0;
 
 		if (!strcmp("ls", input) || !strcmp("dir", input)) {
 			ls();
@@ -308,14 +316,17 @@ void start(void) {
 			pwd();
 		} else if (input[0] == 'c' && input[1] == 'd') {
 			cd(&input[3]);
+			pwd();
 		} else if (input[0] == 'f' && input[1] == 'l' &&
 				   input[2] == 'a' && input[3] == 's' &&
 				   input[4] == 'h') {
+			stopdsp();
 			flash(&input[6]);
 			f_unmount(DRIVE);
 			stopgpu();
 			launchrom();
 		} else if (!strcmp("launch", input)) {
+			stopdsp();
 			f_unmount(DRIVE);
 			stopgpu();
 			launchrom();

@@ -20,12 +20,21 @@ _startdsp:
 
 			jsr		blitcode
 
-			clr.w	dspsem				; Initialize the GPU semaphore
-			move.l	#dspmain, D_PC		; Start the GPU init code
+			clr.w	dspsem				; Initialize the DSP semaphore
+			move.l	#dspmain, D_PC		; Start the DSP init code
 			move.l	#DSPGO, D_CTRL
 
-.waitinit:	move.w	dspsem, d0			; Wait for the GPU init code to finish
+.waitinit:	move.w	dspsem, d0			; Wait for the DSP init code to finish
 			beq		.waitinit
+
+			rts
+
+_stopdsp:
+			clr.w	dspsem				; Tell the DSP its time to stop
+
+.waitdsp:	move.l	D_CTRL, d0
+			andi.l	#DSPGO, d0
+			bne		.waitdsp
 
 			rts
 
@@ -42,6 +51,7 @@ rmask1		.equr	r24
 rmask2		.equr	r25
 rbutsmem0	.equr	r26
 rbutsmem1	.equr	r27
+rsem		.equr	r28
 
 ;;
 ;; Each GPU interrupt vector entry is 16 bytes (8 16-bit words)
@@ -113,11 +123,11 @@ rbutsmem1	.equr	r27
 dspmain:
 			movei	#dspstack, isr_sp
 
-			movei	#dspsem, r1		; Notify 68k we are initialized.
+			movei	#dspsem, rsem	; Notify 68k we are initialized.
 			moveq	#1, r2
-			loadw	(r1), r0		; Will load 0 into r0
+			loadw	(rsem), r0		; Will load 0 into r0
 			or		r2, r0			; Set r0 to 1, WAR DSP external write bug
-			storew	r0, (r1)
+			storew	r0, (rsem)
 
 			movei	#infinite, r2
 			movei	#JOYSTICK, rjoy ; (+ 2 = JOYBUTS)
@@ -187,17 +197,28 @@ mainloop:	moveq	#0, rbuts0		; Clear rbuts0
 			; Process row3 button state from port 1 & 2 in r1
 			PARSEBUTNS	r1, r2, r3, rbuts0, rbuts1, 18
 
-infinite:	movei	#mainloop, r2
+infinite:	load	(rsem), r1		; See if we need to exit
+			movei	#mainloop, r2
 			movei	#$807E, r0		; Select row 0 (NOTE! Audio muted)
 
 			; TODO: Build an actual event queue, diff Vs. previous iteration,
 			; generate events from diff and associate timestamps with them.
 
-			store	rbuts0, (rbutsmem0)
-			store	rbuts1, (rbutsmem1)
+			cmpq	#0, r1			; Has dspsem been cleared?
+			store	rbuts0, (rbutsmem0)	; Save rbuts0 to DSP memory
+			jr		EQ, stopdsp		; If dspsem was cleared, stop the GPU
+			store	rbuts1, (rbutsmem1)	; Save rbuts1 to DSP memory
 
 			jump	(r2)
 			storew	r0, (rjoy)
+
+stopdsp:	movei	#D_CTRL, r1
+			load	(r1), r2		; WAR DSP store bug?
+			moveq	#0, r0
+			and		r2, r0			; WAR DSP store bug?
+			store	r0, (r1)
+			nop
+			nop
 
 			.phrase
 ; Data stored in DSP memory
