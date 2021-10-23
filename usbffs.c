@@ -5,6 +5,7 @@
 #include "sprintf.h"
 #include "flash.h"
 #include "ffsgpu.h"
+#include "dspjoy.h"
 #include "ffs/ff.h"
 #include "ffs/diskio.h"
 
@@ -287,6 +288,8 @@ void start(void) {
 
 	printf("Starting up\n");
 
+	startdsp();
+
 	res = f_mount(&fs, DRIVE, 1);
 	if (res != FR_OK) {
 		printf("Failed mounting FS: %s\n", fresToStr(res));
@@ -337,6 +340,9 @@ void start(void) {
 			select(SELECT_CLR|SELECT_DRAW|SELECT_ADD, 1);
 		} else if (!strcmp("prev", input)) {
 			select(SELECT_CLR|SELECT_DRAW|SELECT_ADD, -1);
+		} else if (!strcmp("dumpbuts", input)) {
+			printf("Joypad 0 buttons: 0x%08x\n", butsmem0);
+			printf("Joypad 1 buttons: 0x%08x\n", butsmem1);
 		} else {
 			printf("Invalid command\n");
 		}

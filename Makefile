@@ -25,6 +25,7 @@ FFSOBJS = ffs/ff.o \
 	usbffs.o \
 	string.o \
 	skunk.o \
+	dspjoy.o \
 	flash.o
 
 OBJS = $(COMMONOBJS) \
