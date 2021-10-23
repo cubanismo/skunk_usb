@@ -352,8 +352,37 @@ void start(void) {
 		} else if (!strcmp("prev", input)) {
 			select(SELECT_CLR|SELECT_DRAW|SELECT_ADD, -1);
 		} else if (!strcmp("dumpbuts", input)) {
-			printf("Joypad 0 buttons: 0x%08x\n", butsmem0);
-			printf("Joypad 1 buttons: 0x%08x\n", butsmem1);
+#define PRINTBUTTONONPORT(PORT, BUTTON) \
+	if (butsmem##PORT & JB_MASK(BUTTON)) \
+		printf("Joypad " #PORT ": '" #BUTTON "' pressed\n")
+
+#define PRINTBUTTON(BUTTON) \
+	PRINTBUTTONONPORT(0, BUTTON); \
+	PRINTBUTTONONPORT(1, BUTTON)
+
+			printf("Joypad 0 raw buttons: 0x%08x\n", butsmem0);
+			printf("Joypad 1 raw buttons: 0x%08x\n", butsmem1);
+			PRINTBUTTON(0);
+			PRINTBUTTON(1);
+			PRINTBUTTON(2);
+			PRINTBUTTON(3);
+			PRINTBUTTON(4);
+			PRINTBUTTON(5);
+			PRINTBUTTON(6);
+			PRINTBUTTON(7);
+			PRINTBUTTON(8);
+			PRINTBUTTON(9);
+			PRINTBUTTON(STAR);
+			PRINTBUTTON(HASH);
+			PRINTBUTTON(A);
+			PRINTBUTTON(B);
+			PRINTBUTTON(C);
+			PRINTBUTTON(OPTION);
+			PRINTBUTTON(PAUSE);
+			PRINTBUTTON(UP);
+			PRINTBUTTON(DOWN);
+			PRINTBUTTON(LEFT);
+			PRINTBUTTON(RIGHT);
 		} else {
 			printf("Invalid command\n");
 		}

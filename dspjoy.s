@@ -137,8 +137,8 @@ dspmain:
 			; Note all rows should probably be read (Ignoring those != 1) to
 			; avoid throwing off bank switching controllers.
 
-			movei	#$0000000f, rmask0
-			movei	#$000000f0, rmask1
+			movei	#$00000003, rmask0
+			movei	#$000003fc, rmask1
 			movei	#$0000003f, rmask2
 
 			movei	#_butsmem0, rbutsmem0
@@ -146,21 +146,57 @@ dspmain:
 
 			jump	(r2)
 
+; PARSEBUTNS - Parse a row of joystick buttons and shift them into a slot
+;
+; This macro parses a raw dword of the form JOYSTICK:JOYBUTS, extracting the 6
+; bits of joystick state it contains for each port, and packs those 6 bits into
+; the bottom of a register for each port, then optionally shifts that register
+; right by some amount.
+;
+; The intended use case is calling this macro 4 times on the same set of
+; registers for each possible pair of joysticks (1 pair without a team tap, 4
+; pairs with two team taps), passing the same registers for each pair's rows.
+; The result will be 24 bits of packed data in a corresponding register for each
+; joystick, with each register having the same layout:
+;
+;   XXXX ot36 9#Cs 2580 147* BrRL DUAp
+;
+; Where:
+;
+;   r = C1
+;   s = C2
+;   t = C3
+;   0 - 9, *, # = The corresponding keypad buttons
+;   A - C = The corresponding buttons
+;   U = Up
+;   D = Down
+;   L = Left
+;   R = Right
+;   o = Option
+;   p = Pause
+;
+; Parameters (All passed as registers, all clobbered):
+;
+;   raw - The raw JOYSTICK:JOYBUTS data read from the corresponding HW registers
+;   tmp0 - A temporary register used within the macro
+;   tmp1 - Another temporary register used within the macro
+;   buts0 - Packed output for port 0/joypad 0
+;   buts1 - Packed output for port 1/joypad 1
+;   shift - [Optional] buts0/buts1 are shifted right this # of bits if present
 .macro PARSEBUTNS raw, tmp0, tmp1, buts0, buts1, shift
-			rorq	#16, \raw		; swap hi/lo words in r1 to JOYBUTS:JOYSTICK
 			not		\raw			; 0 == pressed? Hard to use. Invert it.
-			shrq	#8, \raw		; Shift j11-j8 -> r1 bits 3-0
-			move	\raw, \tmp0		; Move j11-j8 into rbuts0 3-0
-			shrq	#4, \raw 		; Shift j15-12 -> r1 bits 3-0
-			and		rmask0, \tmp0	; Clear garbage out of rbuts0 31-4
-			move	\raw, \tmp1		; Move j15-12 -> rbuts1 3-0
-			and		rmask1, \raw	; Clear garbage out of r1 19-12, 3-0
-			and		rmask0, \tmp1	; Clear garbage out of rbuts1 31-4
-			or		\raw, \tmp0		; Or b1-0 -> rbuts0 5-4
-			shrq	#2, \raw		; Shift b3-2 -> r1 bits 5-4
-			and		rmask2, \tmp0	; Clear garbage out of rbuts0 19-6
-			and		rmask1, \raw	; Clear garbage out of r1 3-2
-			or		\raw, \tmp1		; Or b3-2 -> rbuts1 5-4
+			move	\raw, \tmp0		; Move b1-b0 into rbuts0 1-0
+			shrq	#2, \raw 		; Shift b3-b2 -> r1 bits 1-0
+			and		rmask0, \tmp0	; Clear garbage out of rbuts0 31-2
+			move	\raw, \tmp1		; Move b3-b2 -> rbuts1 1-0
+			shrq	#20, \raw		; Shift j11-j8 -> r1 bits 5-2
+			and		rmask1, \raw	; Clear garbage out of r1 1-0
+			and		rmask0, \tmp1	; Clear garbage out of rbuts1 31-2
+			or		\raw, \tmp0		; Or j11-j8 -> rbuts0 5-2
+			shrq	#4, \raw		; Shift j15-j12 -> r1 bits 5-2
+			and		rmask2, \tmp0	; Clear garbage out of rbuts0 9-6
+			and		rmask1, \raw	; Clear garbage out of r1 1-0
+			or		\raw, \tmp1		; Or j153-j12 -> rbuts1 5-2
 .if \?shift
 			shlq	#\shift, \tmp0	; Shift bits requested amount
 			shlq	#\shift, \tmp1	; Shift bits requested amount
@@ -175,26 +211,26 @@ mainloop:	moveq	#0, rbuts0		; Clear rbuts0
 			movei	#$80BD, r0		; Select row 1 (NOTE! Audio muted)
 			storew	r0, (rjoy)
 
-			; Process row0 button state from port 1 & 2 in r1
+			; Process row0 button state from port 0 & 1 in r1
 			PARSEBUTNS	r1, r2, r3, rbuts0, rbuts1
 
 			load	(rjoy), r1		; row1 JOYSTICK:JOYBUTS -> r1(hi):r1(lo)
 			movei	#$80DB, r0		; Select row 2 (NOTE! Audio muted)
 			storew	r0, (rjoy)
 
-			; Process row1 button state from port 1 & 2 in r1
+			; Process row1 button state from port 0 & 1 in r1
 			PARSEBUTNS	r1, r2, r3, rbuts0, rbuts1, 6
 
 			load	(rjoy), r1		; row2 JOYSTICK:JOYBUTS -> r1(hi):r1(lo)
 			movei	#$80E7, r0		; Select row 3 (NOTE! Audio muted)
 			storew	r0, (rjoy)
 
-			; Process row2 button state from port 1 & 2 in r1
+			; Process row2 button state from port 0 & 1 in r1
 			PARSEBUTNS	r1, r2, r3, rbuts0, rbuts1, 12
 
 			load	(rjoy), r1		; row3 JOYSTICK:JOYBUTS -> r1(hi):r1(lo)
 
-			; Process row3 button state from port 1 & 2 in r1
+			; Process row3 button state from port 0 & 1 in r1
 			PARSEBUTNS	r1, r2, r3, rbuts0, rbuts1, 18
 
 infinite:	load	(rsem), r1		; See if we need to exit
