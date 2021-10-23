@@ -11,8 +11,8 @@
 
 extern unsigned long testgpu(void);
 extern void showgl(int show);
-extern unsigned short doscale;
-extern unsigned long ticks;
+extern volatile unsigned short doscale;
+extern volatile unsigned long ticks;
 
 #define NUM_DEVS 2
 static USBDev devs[NUM_DEVS];
