@@ -1,9 +1,6 @@
 			.include "jaguar.inc"
 			.include "ffsobj.inc"
-
-			.globl	gpucode
-			.globl	gpucodex
-			.globl	gpuinit
+			.include "blitcode.inc"
 
 			.globl	_startgpu
 			.globl	_testgpu
@@ -28,27 +25,10 @@ gpustack	.equ	G_ENDRAM
 _startgpu:
 			move.l	#gpucodex, d0		; Calculate size of GPU code in dwords
 			sub.l	#gpucode, d0
-			add.l	#3, d0
-			lsr.l	#2, d0
+			move.l	#G_RAM+$8000, a1	; destination = 32b view of G_RAM
+			move.l	#gpucode, a0		; Source = GPU code  block
 
-			move.l	#0, A1_CLIP			; Don't clip blitter writes
-
-			move.l	#G_RAM+$8000, A1_BASE	; destination = 32b view of G_RAM
-			move.l	#gpucode, A2_BASE	; source
-
-			move.l	#XADDPHR|PIXEL32|WID2048|PITCH1, A1_FLAGS
-			move.l	#XADDPHR|PIXEL32|WID2048|PITCH1, A2_FLAGS
-			move.l	#0, A1_PIXEL
-			move.l	#0, A2_PIXEL
-
-			or.l	#1<<16, d0			; Loop 1x(gpu code size in dwords) times
-			move.l	d0, B_COUNT
-
-			move.l	#SRCEN|UPDA1|UPDA2|LFU_REPLACE, B_CMD
-
-.waitblit:	move.l	B_CMD, d0			; Wait for the GPU code blit to complete
-			andi.l	#1, d0
-			beq		.waitblit
+			jsr		blitcode
 
 			move.l	#gputocpuint, LEVEL0	; Install GPU->CPU interrupt handler
 			move.w	#C_GPUENA, INT1		; Enable the GPU interrupt

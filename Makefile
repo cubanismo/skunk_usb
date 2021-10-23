@@ -15,7 +15,7 @@ DUMPOBJS = usbdump.o skunk.o
 
 VERIFOBJS = usbverif.o skunk.o
 
-COMMONGFXOBJS = ffsgpu.o ffsobj.o
+COMMONGFXOBJS = ffsgpu.o ffsobj.o blitcode.o
 
 GFXOBJS = testgfx.o
 
