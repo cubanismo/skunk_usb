@@ -362,6 +362,16 @@ void start(void) {
 
 			printf("Joypad 0 raw buttons: 0x%08x\n", butsmem0);
 			printf("Joypad 1 raw buttons: 0x%08x\n", butsmem1);
+			printf("joyevget: %u joyevput: %u\n", joyevget, joyevput);
+			for (; joyevget != joyevput; joyevget = (joyevget + 8) % 1024) {
+				unsigned short i = joyevget >> 2;
+				printf("  Raw Event: 0x%08x, 0x%08x\n",
+					   joyevbuf[i], joyevbuf[i+1]);
+				printf("  Event button: %u %s at %u\n",
+					   (joyevbuf[i] & 0xff),
+					   (joyevbuf[i] & (1<<12)) ? "Down" : "Up",
+					   joyevbuf[i+1]);
+			}
 			PRINTBUTTON(0);
 			PRINTBUTTON(1);
 			PRINTBUTTON(2);

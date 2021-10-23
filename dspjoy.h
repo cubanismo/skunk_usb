@@ -4,7 +4,7 @@
 /*******************************************************************************
  * Joystick button packing format:                                             *
  *                                                                             *
- *   XXXX ot36 9#Cs 2580 147* BrRL DUAp                                        *
+ *   XXXX 369# ot25 80Cs 147* BrRL DUAp                                        *
  *                                                                             *
  * See PARSEBUTNS macro description in dspjoy.s for more details.              *
  ******************************************************************************/
@@ -21,23 +21,27 @@
 #define JB_7		9
 #define JB_4		10
 #define JB_1		11
-#define JB_0		12
-#define JB_8		13
-#define JB_5		14
-#define JB_2		15
-#define JB_C2		16
-#define JB_C		17
-#define JB_HASH		18
-#define JB_9		19
-#define JB_6		20
-#define JB_3		21
-#define JB_C3		22
-#define JB_OPTION	23
+#define JB_C2		12
+#define JB_C		13
+#define JB_0		14
+#define JB_8		15
+#define JB_5		16
+#define JB_2		17
+#define JB_C3		18
+#define JB_OPTION	19
+#define JB_HASH		20
+#define JB_9		21
+#define JB_6		22
+#define JB_3		23
 
 #define JB_MASK(BUTTON) (1 << JB_##BUTTON)
 
 extern volatile unsigned long butsmem0;
 extern volatile unsigned long butsmem1;
+extern volatile const unsigned short joyevput;
+extern volatile unsigned short joyevget;
+extern volatile unsigned short joyevover;
+extern volatile unsigned long joyevbuf[];
 
 extern void startdsp(void);
 extern void stopdsp(void);

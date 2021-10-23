@@ -5,6 +5,10 @@
 			.globl	_stopdsp
 			.globl	_butsmem0
 			.globl	_butsmem1
+			.globl	_joyevover
+			.globl	_joyevput
+			.globl	_joyevget
+			.globl	_joyevbuf
 
 dspstack	.equ	D_ENDRAM
 
@@ -43,6 +47,12 @@ dspcode:
 			.dsp
 
 isr_sp		.equr	r31
+revbuf		.equr	r14
+rputidx		.equr	r15
+rgetidx		.equr	r16
+rtime		.equr	r17
+rold0		.equr	r18
+rold1		.equr	r19
 rjoy		.equr	r20
 rbuts0		.equr	r21
 rbuts1		.equr	r22
@@ -52,6 +62,7 @@ rmask2		.equr	r25
 rbutsmem0	.equr	r26
 rbutsmem1	.equr	r27
 rsem		.equr	r28
+roverflow	.equr	r29
 
 ;;
 ;; Each GPU interrupt vector entry is 16 bytes (8 16-bit words)
@@ -123,6 +134,13 @@ rsem		.equr	r28
 dspmain:
 			movei	#dspstack, isr_sp
 
+			movei	#_joyevput, r4
+			moveq	#0, rputidx
+			movei	#_joyevget, r5
+			moveq	#0, rgetidx
+			storew	rputidx, (r4)
+			storew	rgetidx, (r5)
+
 			movei	#dspsem, rsem	; Notify 68k we are initialized.
 			moveq	#1, r2
 			loadw	(rsem), r0		; Will load 0 into r0
@@ -131,6 +149,9 @@ dspmain:
 
 			movei	#infinite, r2
 			movei	#JOYSTICK, rjoy ; (+ 2 = JOYBUTS)
+			movei	#D_MOD, r1
+			movei	#_joyevbuf, revbuf
+			movei	#overflow, roverflow
 
 			; TODO Detect TeamTap by reading B0/B2 on row 1 of socket #3:
 			; Will both be 0 if TeamTap is present, both 1 if not.
@@ -143,6 +164,14 @@ dspmain:
 
 			movei	#_butsmem0, rbutsmem0
 			movei	#_butsmem1, rbutsmem1
+
+			movei	#~(1024-1), r0		; 512 entry 2xDWORD event buffer
+			moveq	#0, rtime			; TODO: Use timer to get real timestamps
+
+			moveq	#0, rold0
+			moveq	#0, rold1
+
+			store	r0, (r1)
 
 			jump	(r2)
 
@@ -159,7 +188,7 @@ dspmain:
 ; The result will be 24 bits of packed data in a corresponding register for each
 ; joystick, with each register having the same layout:
 ;
-;   XXXX ot36 9#Cs 2580 147* BrRL DUAp
+;   XXXX 369# ot25 80Cs 147* BrRL DUAp
 ;
 ; Where:
 ;
@@ -233,18 +262,61 @@ mainloop:	moveq	#0, rbuts0		; Clear rbuts0
 			; Process row3 button state from port 0 & 1 in r1
 			PARSEBUTNS	r1, r2, r3, rbuts0, rbuts1, 18
 
+			movei	#_joyevget, r4
+			loadw	(r4), rgetidx
+			or		rgetidx, rgetidx	; WAR DSP store bug?
+			store	rbuts0, (rbutsmem0)	; Save rbuts0 to DSP memory
+			moveq	#0, r4
+			xor		rbuts0, rold0	; XOR with data from last iteration
+			store	rbuts1, (rbutsmem1)	; Save rbuts1 to DSP memory
+			or		r4, r4			; In case no events, WAR unused reg bug
+.butn0loop:	moveq	#1, r3
+			and		rold0, r3		; See if current bit changed
+			movei	#.butn0loop, r6	; Save loop target in r6
+			jr		EQ, .cont0		; If not, continue
+			move	rbuts0, r5		; Copy rbuts0 to r5
+			and		r3, r5			; Set bit 0 to 0 if down->up, 1 if up->down
+			shlq	#12, r5			; Stash it in bit 12
+			or		r4, r5			; Stash the button number in first byte
+			store	r5, (revbuf+rputidx)	; Store event
+			addq	#4, rputidx		; Move to the time dword
+			store	rtime, (revbuf+rputidx)	; Store event timestamp
+			addqmod	#4, rputidx		; Increment put pointer. Wrap if needed.
+			cmp		rputidx, rgetidx; Check if we're caught up with getter
+			jump	EQ, (roverflow)	; Go to overflow handler if so.
+.cont0:		shrq	#1, rold0		; Executed even on overflow
+			jr		EQ, .done0		; If no deltas left, exit.
+			nop						; Must not rotate if r4 not incremented
+			rorq	#1, rbuts0
+			jump	(r6)
+			addq	#1, r4
+
+.done0:		neg		r4				; Restore rbuts0
+			addq	#32, r4
+			ror		r4, rbuts0
+			move	rbuts0, rold0	; And save it in rold0
+
+.butn1:		move	rbuts1, rold1	; Save rbuts1 in rold0
+			; TODO Make above a macro, stamp it out again here for port 1
+
+			movei	#_joyevput, r4
+			jr		infinite
+			storew	rputidx, (r4)
+
+overflow:	movei	#_joyevover, r3	; Load address of overflow flag
+			loadw	(r3), r4		; Load it (WAR DSP store bug)
+			moveq	#1, r2			; Load a 1 in r2
+			or		r4, r4			; Wait for load (WAR DSP store bug)
+			storew	r2, (r3)		; Store 1 in overflow flag.
+
 infinite:	load	(rsem), r1		; See if we need to exit
-			movei	#mainloop, r2
 			movei	#$807E, r0		; Select row 0 (NOTE! Audio muted)
 
-			; TODO: Build an actual event queue, diff Vs. previous iteration,
-			; generate events from diff and associate timestamps with them.
-
 			cmpq	#0, r1			; Has dspsem been cleared?
-			store	rbuts0, (rbutsmem0)	; Save rbuts0 to DSP memory
 			jr		EQ, stopdsp		; If dspsem was cleared, stop the GPU
-			store	rbuts1, (rbutsmem1)	; Save rbuts1 to DSP memory
+			nop
 
+			movei	#mainloop, r2
 			jump	(r2)
 			storew	r0, (rjoy)
 
@@ -260,6 +332,8 @@ stopdsp:	movei	#D_CTRL, r1
 ; Data stored in DSP memory
 _butsmem0:	.ds.l	1
 _butsmem1:	.ds.l	1
+_joyevbuf:	.ds.l	1024
+
 
 
 			.68000
@@ -269,3 +343,6 @@ dspcodex:
 			.long
 
 dspsem:		.ds.w	1
+_joyevover:	.ds.w	1
+_joyevput:	.ds.w	1
+_joyevget:	.ds.w	1
