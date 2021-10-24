@@ -1,0 +1,12 @@
+root = true
+
+[*.{cc,c,cpp,h,hpp}]
+indent_style = tab
+indent_size = 4
+
+[*.{s,inc}]
+indent_style = tab
+indent_size = 4
+
+[Makefile]
+indent_style = tab
