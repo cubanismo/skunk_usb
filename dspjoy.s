@@ -11,6 +11,7 @@
 			.globl	_joyevbuf
 
 dspstack	.equ	D_ENDRAM
+EVBUFSIZE	.equ	1024
 
 			.68000
 			.text
@@ -23,6 +24,9 @@ _startdsp:
 			move.l	#D_RAM, a1
 
 			jsr		blitcode
+
+			move.w	#1329, JPIT1		; divider1 = 1330
+			move.w	#1, JPIT2			; divider2 = 2
 
 			clr.w	dspsem				; Initialize the DSP semaphore
 			move.l	#dspmain, D_PC		; Start the DSP init code
@@ -46,23 +50,26 @@ _stopdsp:
 dspcode:
 			.dsp
 
-isr_sp		.equr	r31
+rputidx		.equr	r12
+rgetidx		.equr	r13
 revbuf		.equr	r14
-rputidx		.equr	r15
-rgetidx		.equr	r16
-rtime		.equr	r17
-rold0		.equr	r18
-rold1		.equr	r19
-rjoy		.equr	r20
-rbuts0		.equr	r21
-rbuts1		.equr	r22
-rmask0		.equr	r23
-rmask1		.equr	r24
-rmask2		.equr	r25
-rbutsmem0	.equr	r26
-rbutsmem1	.equr	r27
-rsem		.equr	r28
-roverflow	.equr	r29
+rtime		.equr	r15
+rold0		.equr	r16
+rold1		.equr	r17
+rjoy		.equr	r18
+rbuts0		.equr	r19
+rbuts1		.equr	r20
+rmask0		.equr	r21
+rmask1		.equr	r22
+rmask2		.equr	r23
+rbutsmem0	.equr	r24
+rbutsmem1	.equr	r25
+rsem		.equr	r26
+roverflow	.equr	r27
+risrflags	.equr	r28
+risrtmp0	.equr	r29
+risrflgptr	.equr	r30
+isr_sp		.equr	r31
 
 ;;
 ;; Each GPU interrupt vector entry is 16 bytes (8 16-bit words)
@@ -92,14 +99,10 @@ roverflow	.equr	r29
 			nop
 
 ; Timer Interrupt 1
-			nop
-			nop
-			nop
-			nop
-			nop
-			nop
-			nop
-			nop
+			movei	#dsptmr1, risrflags
+			movei	#D_FLAGS, risrflgptr
+			jump	(risrflags)
+			load	(risrflgptr), risrflags
 
 ; Timer Interrupt 2
 			nop
@@ -138,14 +141,19 @@ dspmain:
 			moveq	#0, rputidx
 			movei	#_joyevget, r5
 			moveq	#0, rgetidx
+			movei	#D_FLAGS, r6
 			storew	rputidx, (r4)
+
 			storew	rgetidx, (r5)
+			load	(r6), r7
+			bset	#6, r7
 
 			movei	#dspsem, rsem	; Notify 68k we are initialized.
 			moveq	#1, r2
 			loadw	(rsem), r0		; Will load 0 into r0
 			or		r2, r0			; Set r0 to 1, WAR DSP external write bug
 			storew	r0, (rsem)
+			store	r7, (r6)		; Enable D_TIM1ENA (Must be after rsem set)
 
 			movei	#infinite, r2
 			movei	#JOYSTICK, rjoy ; (+ 2 = JOYBUTS)
@@ -165,7 +173,7 @@ dspmain:
 			movei	#_butsmem0, rbutsmem0
 			movei	#_butsmem1, rbutsmem1
 
-			movei	#~(1024-1), r0		; 512 entry 2xDWORD event buffer
+			movei	#~(EVBUFSIZE-1), r0	; (EVBUFSIZE/2) entry 2xDWORD event buf
 			moveq	#0, rtime			; TODO: Use timer to get real timestamps
 
 			moveq	#0, rold0
@@ -320,7 +328,13 @@ infinite:	loadw	(rsem), r1		; See if we need to exit
 			jump	(r2)
 			storew	r0, (rjoy)
 
-stopdsp:	movei	#D_CTRL, r1
+stopdsp:	movei	#D_FLAGS, r1	; Wait for intr handler to disable itself
+.idleintr:	load	(r1), r2
+			movei	#D_TIM1ENA, r0
+			and		r2, r0
+			jr		NE, .idleintr
+			nop
+			movei	#D_CTRL, r1		; Then stop the processor
 			load	(r1), r2		; WAR DSP store bug?
 			moveq	#0, r0
 			and		r2, r0			; WAR DSP store bug?
@@ -328,16 +342,38 @@ stopdsp:	movei	#D_CTRL, r1
 			nop
 			nop
 
+dsptmr1:	addq	#1, rtime		; Add one to time value
+			loadw	(rsem), risrtmp0; Check rsem value
+
+			cmpq	#0, risrtmp0
+
+			jr		NE, .endintr
+			nop
+			bclr	#6, risrflags	; Disable this interrupt
+
+.endintr:	; Get out of here,
+			bclr	#3, risrflags
+			bset	#11, risrflags
+			load	(isr_sp), risrtmp0
+			addq	#2, risrtmp0
+			addq	#4, isr_sp
+			jump	(risrtmp0)
+			store	risrflags, (risrflgptr)
+dspdata:
+
 			.phrase
 ; Data stored in DSP memory
 _butsmem0:	.ds.l	1
 _butsmem1:	.ds.l	1
-_joyevbuf:	.ds.l	1024
+_joyevbuf:	.ds.l	EVBUFSIZE
 
 
 
 			.68000
 dspcodex:
+
+.print "dspcode size: ",/u/w (dspdata-D_RAM), " bytes."
+.print "dspcode+dspdata size: ",/u/w (dspcodex-dspcode), " bytes."
 
 			.bss
 			.long
