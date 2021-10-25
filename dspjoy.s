@@ -9,6 +9,7 @@
 			.globl	_joyevput
 			.globl	_joyevget
 			.globl	_joyevbuf
+			.globl	_joydbuf
 
 dspstack	.equ	D_ENDRAM
 EVBUFSIZE	.equ	1024
@@ -25,6 +26,7 @@ _startdsp:
 
 			jsr		blitcode
 
+			; This sets up a timer period of approximately 100us
 			move.w	#1329, JPIT1		; divider1 = 1330
 			move.w	#1, JPIT2			; divider2 = 2
 
@@ -50,10 +52,12 @@ _stopdsp:
 dspcode:
 			.dsp
 
-rputidx		.equr	r12
-rgetidx		.equr	r13
-revbuf		.equr	r14
-rtime		.equr	r15
+rdbtime		.equr	r10
+rputidx		.equr	r11
+rgetidx		.equr	r12
+rtime		.equr	r13
+rdbuf		.equr	r14
+revbuf		.equr	r15
 rold0		.equr	r16
 rold1		.equr	r17
 rjoy		.equr	r18
@@ -70,6 +74,8 @@ risrflags	.equr	r28
 risrtmp0	.equr	r29
 risrflgptr	.equr	r30
 isr_sp		.equr	r31
+
+GT			ccdef	%10101
 
 ;;
 ;; Each GPU interrupt vector entry is 16 bytes (8 16-bit words)
@@ -143,6 +149,7 @@ dspmain:
 			moveq	#0, rgetidx
 			movei	#D_FLAGS, r6
 			storew	rputidx, (r4)
+			moveq	#0, rtime
 
 			storew	rgetidx, (r5)
 			load	(r6), r7
@@ -174,10 +181,17 @@ dspmain:
 			movei	#_butsmem1, rbutsmem1
 
 			movei	#~(EVBUFSIZE-1), r0	; (EVBUFSIZE/2) entry 2xDWORD event buf
-			moveq	#0, rtime			; TODO: Use timer to get real timestamps
 
 			moveq	#0, rold0
 			moveq	#0, rold1
+
+			movei	#100, rdbtime
+			movei	#_joydbuf, rdbuf
+			moveq	#24, r3				; 24 buttons
+			shlq	#2, r3				; * sizeof(dword)
+.initdb:	subq	#4, r3
+			jr		NE, .initdb
+			store	rold0, (rdbuf+r3)
 
 			store	r0, (r1)
 
@@ -270,12 +284,31 @@ mainloop:	moveq	#0, rbuts0		; Clear rbuts0
 			; Process row3 button state from port 0 & 1 in r1
 			PARSEBUTNS	r1, r2, r3, rbuts0, rbuts1, 18
 
+			; Build Debounce mask
+			moveq	#23, r3
+			shlq	#2, r3			; Multiply starting index by sizeof(dword)
+			moveq	#0, r0
+.builddb:	shlq	#1, r0			; Shift prev iter bit (if any) out of way
+			load	(rdbuf+r3), r5
+			cmp		rtime, r5
+			jr		GT, .bouncing	; If r5/bounce timeout > rtime, ignore input
+			nop
+			bset	#0, r0			; Else, set the "change recognized" bit.
+			store	rtime, (rdbuf+r3)	; Avoid timer wrapping issues
+.bouncing:	subq	#4, r3
+			jr		PL, .builddb
+			nop
+
 			movei	#_joyevget, r4
 			loadw	(r4), rgetidx
 			or		rgetidx, rgetidx	; WAR DSP store bug?
 			store	rbuts0, (rbutsmem0)	; Save rbuts0 to DSP memory
 			moveq	#0, r4
-			xor		rbuts0, rold0	; XOR with data from last iteration
+			xor		rbuts0, rold0	; diff against data from last iteration
+			move	rold0, r6		; Copy the diff into r6
+			and		r0, rold0		; Debounce the state diff
+			xor		rold0, r6		; Diff the raw diff Vs the debounced diff
+			xor		r6, rbuts0		; Debounce rbuts0
 			store	rbuts1, (rbutsmem1)	; Save rbuts1 to DSP memory
 			or		r4, r4			; In case no events, WAR unused reg bug
 .butn0loop:	moveq	#1, r3
@@ -288,7 +321,12 @@ mainloop:	moveq	#0, rbuts0		; Clear rbuts0
 			or		r4, r5			; Stash the button number in first byte
 			store	r5, (revbuf+rputidx)	; Store event
 			addq	#4, rputidx		; Move to the time dword
-			store	rtime, (revbuf+rputidx)	; Store event timestamp
+			move	rtime, r7		; Make a copy of current time
+			store	r7, (revbuf+rputidx)	; Store event timestamp
+			move	r4, r8			; Get a copy of button number in r8
+			add		rdbtime, r7		; Ignore changes on this button for ~10ms
+			shlq	#2, r8			; Multiply button number by sizeof(dword)
+			store	r7, (rdbuf+r8)	; Store bounce timeout in _joydbuf[button]
 			addqmod	#4, rputidx		; Increment put pointer. Wrap if needed.
 			cmp		rputidx, rgetidx; Check if we're caught up with getter
 			jump	EQ, (roverflow)	; Go to overflow handler if so.
@@ -365,9 +403,8 @@ dspdata:
 ; Data stored in DSP memory
 _butsmem0:	.ds.l	1
 _butsmem1:	.ds.l	1
+_joydbuf:	.ds.l	24
 _joyevbuf:	.ds.l	EVBUFSIZE
-
-
 
 			.68000
 dspcodex:
