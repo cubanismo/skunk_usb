@@ -10,7 +10,7 @@ extern int sprintf(char *str, const char *fmt, ...);
 #if defined(USE_SKUNK)
 extern int printf(const char *fmt, ...);
 #else
-static inline printf(const char *fmt, ...) { return 0; }
+static inline int printf(const char *fmt, ...) { return 0; }
 #endif
 
 #endif /* SPRINTF_H_ */
