@@ -1,19 +1,27 @@
 ALIGN=q
 include $(JAGSDK)/tools/build/jagdefs.mk
 
+# Change this to 0 to build without the skunk console dependency.
+# Programs that won't work without the console won't be built.
+# This is most useful for building the stand-alone version of usbffs.
+SKUNKLIB := 1
+
 CFLAGS += -Wall -fno-builtin -I.
 
 COMMONSTART = startup.o
 COMMONOBJS = usb.o \
 	sprintf.o \
-	skunkc.o \
 	util.o
 
-TESTOBJS = testdrv.o skunk.o
+ifeq ($(SKUNKLIB),1)
+	COMMONOBJS += skunkc.o skunk.o
+endif
 
-DUMPOBJS = usbdump.o skunk.o
+TESTOBJS = testdrv.o
 
-VERIFOBJS = usbverif.o skunk.o
+DUMPOBJS = usbdump.o
+
+VERIFOBJS = usbverif.o
 
 COMMONGFXOBJS = ffsgpu.o ffsobj.o blitcode.o
 
@@ -24,7 +32,6 @@ FFSOBJS = ffs/ff.o \
 	ffs/ffunicode.o \
 	usbffs.o \
 	string.o \
-	skunk.o \
 	dspjoy.o \
 	flash.o
 
@@ -43,9 +50,16 @@ VERIFCOF = usbverif.cof
 FFSCOF = usbffs.cof
 GFXCOF = testgfx.cof
 
-include $(JAGSDK)/jaguar/skunk/skunk.mk
+ifeq ($(SKUNKLIB),1)
+	include $(JAGSDK)/jaguar/skunk/skunk.mk
+endif
 
-PROGS = $(TESTCOF) $(DUMPCOF) $(VERIFCOF) $(FFSCOF) $(GFXCOF)
+PROGS = $(FFSCOF) $(GFXCOF)
+
+ifeq ($(SKUNKLIB),1)
+	# These programs require the skunk console to work.
+	PROGS += $(TESTCOF) $(DUMPCOF) $(VERIFCOF)
+endif
 
 $(TESTCOF): $(COMMONSTART) $(COMMONOBJS) $(TESTOBJS)
 	$(LINK) $(LINKFLAGS) -o $@ $^

@@ -1,5 +1,7 @@
 // Skunk USB - FatFS Filesystem Interaction
+#if defined(USE_SKUNK)
 #include "skunk.h"
+#endif
 #include "usb.h"
 #include <string.h>
 #include "sprintf.h"
@@ -8,6 +10,8 @@
 #include "dspjoy.h"
 #include "ffs/ff.h"
 #include "ffs/diskio.h"
+
+#define CHECKEDPF(...) if (!consoleBusy) printf(__VA_ARGS__)
 
 extern unsigned long testgpu(void);
 extern void showgl(int show);
@@ -22,9 +26,17 @@ static char path[4096];
 static char input[1024];
 static FATFS fs;
 static DIR dir;
-static FILINFO fi;
-static FIL f;
+static FILINFO fi[1024];
+static unsigned short numFiles = 0;
 static BYTE consoleBusy = 0;
+
+struct FlashData {
+	FIL f;
+	unsigned int bytesPerLine;
+	unsigned short totalBlocks;
+	unsigned short erasedBlocks;
+	unsigned short linesDrawn;
+};
 
 DSTATUS disk_initialize(BYTE pdrv)
 {
@@ -102,53 +114,93 @@ static const char *fresToStr(FRESULT fr) {
 
 static long read_file(void *priv, char *buf, unsigned int bytes)
 {
-	FIL* fp = priv;
+	struct FlashData *data = priv;
+	int bytesRead;
+	unsigned short linesRead;
 	FRESULT res;
 
-	res = f_read(fp, buf, bytes, &bytes);
+	if (buf) {
+		res = f_read(&data->f, buf, bytes, &bytes);
 
-	if (res != FR_OK) {
-		printf("Error reading from file: %s\n", fresToStr(res));
-		return -1;
+		if (res != FR_OK) {
+			CHECKEDPF("Error reading from file: %s\n", fresToStr(res));
+			return -1;
+		}
+
+		bytesRead = f_tell(&data->f) - 0x2000;
+
+		linesRead = bytesRead / data->bytesPerLine;
+
+		CHECKEDPF("Lines read: %u Lines drawn: %u\n",
+				  linesRead, data->linesDrawn);
+
+		if (linesRead > data->linesDrawn) {
+			invertrect(gamelstbm,
+					   ((data->totalBlocks + data->linesDrawn) << 16) | 0,
+					   ((linesRead - data->linesDrawn) << 16 | GL_WIDTH));
+			data->linesDrawn = linesRead;
+		}
+
+		CHECKEDPF("Read %u of %u bytes from ROM file\n",
+				  bytesRead, f_size(&data->f) - 0x2000);
+	} else {
+		/* A NULL buffer means this is a notification a block has been erased */
+		data->erasedBlocks++;
+		CHECKEDPF("Erased %u of %u blocks\n",
+				  data->erasedBlocks, data->totalBlocks);
+		invertrect(gamelstbm,
+				   ((data->erasedBlocks-1) << 16) | 0,
+				   (1 << 16) | GL_WIDTH);
 	}
-
-	/* Temporary: useful to track progress when debugging */
-	printf("Read %u of %u bytes from ROM file\n", f_tell(fp), f_size(fp));
 
 	return bytes;
 }
 
 static void flash(const char *file) {
 	FRESULT res;
-	unsigned short erase_blocks = 62; /* Erase entire 4MB bank by default */
+	struct FlashData data;
+	unsigned short flashLines;
+
+	data.totalBlocks = 70; /* Erase entire 4MB bank by default */
+	data.erasedBlocks = 0;
+	data.linesDrawn = 0;
 
 	sprintf(path, "%s/%s", cwd, file);
 
-	res = f_open(&f, path, FA_READ);
+	res = f_open(&data.f, path, FA_READ);
 
 	if (res != FR_OK) {
-		printf("Error opening ROM file '%s': %s\n", path, fresToStr(res));
+		CHECKEDPF("Error opening ROM file '%s': %s\n", path, fresToStr(res));
 		return;
 	}
 
 	/* Skip ROM header */
-	res = f_lseek(&f, 0x2000);
+	res = f_lseek(&data.f, 0x2000);
 
-	if (res != FR_OK || f_tell(&f) != 0x2000) {
-		printf("Error seeking past ROM header: %s\n", fresToStr(res));
-		f_close(&f);
+	if (res != FR_OK || f_tell(&data.f) != 0x2000) {
+		CHECKEDPF("Error seeking past ROM header: %s\n", fresToStr(res));
+		f_close(&data.f);
 		return;
 	}
 
-	if (f_size(&f) <= 0x200000ul) {
-		erase_blocks = 30; /* ROM is <= 2MB. Only erase first 2MB */
+	if (f_size(&data.f) <= 0x200000ul) {
+		data.totalBlocks = 38; /* ROM is <= 2MB. Only erase first 2MB */
 	}
 
-	flashrom(&read_file, &f, erase_blocks);
+	flashLines = GL_HEIGHT - data.totalBlocks;
+	data.bytesPerLine = (f_size(&data.f) - 0x2000) / flashLines;
+	CHECKEDPF("flashLines: %u bytesPerLine: %u\n",
+			  flashLines, data.bytesPerLine);
 
-	f_close(&f);
+	/* Clear the game list so we can use it as a status bar */
+	clrgamelst();
 
-	printf("Flashing complete\n");
+	/* 8 initial blocks are always used */
+	flashrom(&read_file, &data, data.totalBlocks - 8);
+
+	f_close(&data.f);
+
+	CHECKEDPF("Flashing complete\n");
 }
 
 enum {
@@ -159,8 +211,9 @@ enum {
 	SELECT_VAL_MASK	= SELECT_ADD | SELECT_SET,
 } SelectOps;
 
-static void select(unsigned short op, short val) {
-	static int selection = -1;
+static short select(unsigned short op, short val) {
+	static short selection = -1;
+	short newSelection = selection;
 	if ((selection >= 0) && (op & SELECT_CLR)) {
 		invertrect(gamelstbm,
 				   ((selection * FNTHEIGHT) << 16) | 0,
@@ -169,67 +222,85 @@ static void select(unsigned short op, short val) {
 
 	switch (op & SELECT_VAL_MASK) {
 	case SELECT_ADD:
-		selection += val;
+		newSelection += val;
 		break;
 	case SELECT_SET:
-		selection = val;
+		newSelection = val;
 		break;
 
 	default:
-		printf("Invalid selection val operation: 0x%x\n", op & SELECT_VAL_MASK);
+		CHECKEDPF("Invalid selection val operation: 0x%x\n",
+				  op & SELECT_VAL_MASK);
+		/* Fall through */
+	case 0:
 		break;
 	}
+
+	if (newSelection < 0) {
+		newSelection = 0;
+	}
+
+	if (newSelection >= numFiles) {
+		newSelection = numFiles - 1;
+	}
+
+	selection = newSelection;
 
 	if ((selection >= 0) && (op & SELECT_DRAW)) {
 		invertrect(gamelstbm,
 				   ((selection * FNTHEIGHT) << 16) | 0,
 				   (FNTHEIGHT << 16) | GL_WIDTH);
 	}
+
+	return selection;
 }
 
 static void ls(void) {
 	unsigned coord = 0;
+	unsigned idx = 0;
 	FRESULT res;
 
-	select(SELECT_SET, -1);
 	clrgamelst();
 
 	res = f_opendir(&dir, cwd);
 	if (res != FR_OK) {
-		printf("Failed open dir: %s\n", fresToStr(res));
+		CHECKEDPF("Failed open dir: %s\n", fresToStr(res));
 		return;
 	}
 
-	while (1) {
-		res = f_readdir(&dir, &fi);
+	for (idx = 0; 1; idx++) {
+		res = f_readdir(&dir, &fi[idx]);
 		if (res != FR_OK) {
-			printf("Failed to read next file in dir: %s\n", fresToStr(res));
+			CHECKEDPF("Failed to read next file in dir: %s\n", fresToStr(res));
 			goto done;
 		}
 
-		if (fi.fname[0] == 0) {
+		if (fi[idx].fname[0] == 0) {
 			break;
 		}
 
-		drawstring(gamelstbm, coord, fi.fname);
+		sprintf(input, "%s%s",
+				fi[idx].fname, (fi[idx].fattrib & AM_DIR) ? "/" : "");
+
+		drawstring(gamelstbm, coord, input);
 		coord += (12 << 16);
 
-		if (!consoleBusy) {
-			printf("%s%s\n", fi.fname, (fi.fattrib & AM_DIR) ? "/" : "");
-		}
+		CHECKEDPF("%s\n", input);
 	}
+
+	numFiles = idx;
 
 done:
 	res = f_closedir(&dir);
 	if (res != FR_OK) {
-		printf("Failed to close dir: %s\n", fresToStr(res));
+		CHECKEDPF("Failed to close dir: %s\n", fresToStr(res));
 	}
 
 	select(SELECT_DRAW | SELECT_SET, 0);
 }
 
 static void pwd(void) {
-	printf("%s\n", cwd);
+	CHECKEDPF("%s\n", cwd);
 }
 
 static int cdup(void) {
@@ -266,7 +337,8 @@ static void cd(const char *newdir) {
 
 	res = f_opendir(&dir, path);
 	if (res != FR_OK) {
-		printf("Error changing directory to %s: %s\n", newdir, fresToStr(res));
+		CHECKEDPF("Error changing directory to %s: %s\n",
+				  newdir, fresToStr(res));
 		return;
 	}
 
@@ -276,17 +348,40 @@ static void cd(const char *newdir) {
 
 #define DRIVE "0"
 
+static void dorom(const char *fname) {
+	CHECKEDPF("Stopping DSP\n");
+	stopdsp();
+	if (fname) {
+		CHECKEDPF("Flashing\n");
+		flash(fname);
+	}
+	CHECKEDPF("Unmounting drive\n");
+	f_unmount(DRIVE);
+	CHECKEDPF("Stopping GPU\n");
+	stopgpu();
+	CHECKEDPF("Launching\n");
+#if defined(USE_SKUNK)
+	if (!consoleBusy) {
+		skunkCONSOLECLOSE();
+	}
+#endif /* defined(USE_SKUNK) */
+	launchrom();
+}
+
 void start(void) {
 	FRESULT res;
 	int i;
+	static int showList = 1;
 
 	for (i = 0; i < NUM_DEVS; i++) {
 		initialized[i] = 0;
 	}
 
+#if defined(USE_SKUNK)
 	skunkRESET();
 	skunkNOP();
 	skunkNOP();
+#endif /* defined(USE_SKUNK) */
 
 	printf("Starting up\n");
 
@@ -300,13 +395,57 @@ void start(void) {
 
 	sprintf(cwd, "0:/");
 
+	showgl(1);
+	ls();
+
 	while (1) {
+#if defined(USE_SKUNK)
 		if (!skunkCONSOLESETUPREAD()) break;
 		consoleBusy = 1;
 		memset(input, 0, sizeof(input));
-		while (!skunkCONSOLECHECKREAD()) {
-			/* Handle joystick events here */
+		while (!skunkCONSOLECHECKREAD())
+#endif
+		{
+			for (; joyevget != joyevput; joyevget = (joyevget + 8) % 1024) {
+				unsigned short i = joyevget >> 2;
+				unsigned long ev = joyevbuf[i];
+				short idx;
+
+				if (ev & (1 << 12)) {
+					switch (ev & 0xff) {
+					case JB_UP:
+						select(SELECT_CLR|SELECT_DRAW|SELECT_ADD, -1);
+						break;
+					case JB_DOWN:
+						select(SELECT_CLR|SELECT_DRAW|SELECT_ADD, 1);
+						break;
+					case JB_B:
+						idx = select(0, 0);
+						if (idx > 0) {
+							if (fi[idx].fattrib & AM_DIR) {
+								cd(fi[idx].fname);
+								ls();
+							} else {
+								dorom(fi[idx].fname /* Flash ROM and launch */);
+							}
+						}
+						break;
+					case JB_C:
+						dorom(NULL /* Don't flash anything. Just launch */);
+						break;
+					case JB_OPTION:
+						ls();
+						break;
+					case JB_PAUSE:
+						showgl(showList = !showList);
+						break;
+					default:
+						break;
+					}
+				}
+			}
 		}
+#if defined(USE_SKUNK)
 		skunkCONSOLEFINISHREAD(input, sizeof(input) - 1);
 		consoleBusy = 0;
 
@@ -320,16 +459,9 @@ void start(void) {
 		} else if (input[0] == 'f' && input[1] == 'l' &&
 				   input[2] == 'a' && input[3] == 's' &&
 				   input[4] == 'h') {
-			stopdsp();
-			flash(&input[6]);
-			f_unmount(DRIVE);
-			stopgpu();
-			launchrom();
+			dorom(&input[6] /* Flash ROM and launch  */);
 		} else if (!strcmp("launch", input)) {
-			stopdsp();
-			f_unmount(DRIVE);
-			stopgpu();
-			launchrom();
+			dorom(NULL /* Don't flash, just launch */);
 		} else if (!strcmp("quit", input)) {
 			break;
 		} else if (!strcmp("testgpu", input)) {
@@ -365,11 +497,9 @@ void start(void) {
 			printf("joyevget: %u joyevput: %u\n", joyevget, joyevput);
 			for (; joyevget != joyevput; joyevget = (joyevget + 8) % 1024) {
 				unsigned short i = joyevget >> 2;
-				printf("  Raw Event: 0x%08x, 0x%08x\n",
-					   joyevbuf[i], joyevbuf[i+1]);
 				printf("  Event button: %u %s at %u\n",
 					   (joyevbuf[i] & 0xff),
-					   (joyevbuf[i] & (1<<12)) ? "Down" : "Up",
+					   (joyevbuf[i] & (1<<12)) ? "Down" : " Up ",
 					   joyevbuf[i+1]);
 			}
 			PRINTBUTTON(0);
@@ -396,10 +526,14 @@ void start(void) {
 		} else {
 			printf("Invalid command\n");
 		}
+#endif /* defined(USE_SKUNK) */
 	}
 done:
 	f_unmount(DRIVE);
+	stopdsp();
 	stopgpu();
 	printf("Exiting\n");
+#if defined(USE_SKUNK)
 	skunkCONSOLECLOSE();
+#endif /* defined(USE_SKUNK) */
 }

@@ -1,5 +1,4 @@
 .include "jaguar.inc"
-.include "skunk.inc"
 
 		.globl	_flashrom
 		.globl	_launchrom
@@ -79,9 +78,6 @@ _flashrom:
 		move.w	#$c501, $801c94
 		move.w	#$8088, $80036a
 
-		lea		flashmsg, a0
-		jsr		skunkCONSOLEWRITE
-
 		; Start copying data to the flash
 .readblock:
 		move.l	#BUFSIZE, -(sp)	; Byte count
@@ -148,7 +144,8 @@ _flashrom:
 		rts
 
 ; Copied verbatim from the BIOS code.
-; Returns the status in d0
+; Returns the status in d0.
+; Expects a2 = "get data" callback, d5 = "get data" callback private data
 EraseBlockInA0:
 		move.w	#$4000, (a5)		; Enter Flash read/write mode
 
@@ -167,10 +164,13 @@ EraseBlockInA0:
 
 		move.w	#$4001, (a5)		; Enter Flash read-only mode
 
-		move.l	a0, -(sp)
-		lea	erasemsg, a0
-		jsr	skunkCONSOLEWRITE
-		move.l	(sp)+, a0
+		movem.l	d0-d1/a0-a1, -(sp)	; Preserve d0, d1,a0 and a1
+		move.l	#0, -(sp)			; Byte count
+		move.l	#0, -(sp)			; destination buffer
+		move.l	d5, -(sp)			; Private data
+		jsr		(a2)				; Bytes read in d0
+		lea		(12,sp), sp			; restore stack
+		movem.l	(sp)+, d0-d1/a0-a1	; Restore registers
 		rts
 
 resetezhost:
@@ -224,22 +224,12 @@ _launchrom:
 		move.w	#4001, (a1)			; set flash read-only mode
 		move.w	#$4BA0, (a1)		; Select bank 0
 
-		jsr		skunkCONSOLECLOSE
 		jsr		resetezhost
 
 		move.l	#INITSTACK, a7		; Set Atari's default stack
 		move.l	#$802000, a0
 		jsr		(a0)				; Go! Go! Go!
 		rts							; Unreachable
-
-		.data
-
-		.long
-
-flashmsg: .dc.b	'Finished erase.',13,10,0
-		.long
-erasemsg: .dc.b	'Erased block.',13,10,0
-		.long
 
 		.bss
 
