@@ -1,7 +1,7 @@
 #ifndef STRING_H_
 #define STRING_H_
 
-typedef unsigned int size_t;
+#include <stddef.h>
 
 /* Minimal string.h containing functions needed by FatFS */
 extern void *memcpy(void *dest, const void *src, size_t n);
