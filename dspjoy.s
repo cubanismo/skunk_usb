@@ -309,7 +309,7 @@ overflow:	movei	#_joyevover, r3	; Load address of overflow flag
 			or		r4, r4			; Wait for load (WAR DSP store bug)
 			storew	r2, (r3)		; Store 1 in overflow flag.
 
-infinite:	load	(rsem), r1		; See if we need to exit
+infinite:	loadw	(rsem), r1		; See if we need to exit
 			movei	#$807E, r0		; Select row 0 (NOTE! Audio muted)
 
 			cmpq	#0, r1			; Has dspsem been cleared?
