@@ -13,12 +13,15 @@
 ; to ((a phrase)-1 byte) of data beyond the end of the blit in the destination
 ; location.
 ;
+; Because blicode is used by loader.s, which must be position-independent, this
+; code must also be position-independent.
+;
 ; Parameters:
 ;  d0: Size, in bytes, of the code or data to be transferred.
 ;  a0: Address of the source data
 ;  a1: Address of the destination
 ;
-; Registered clobbered:
+; Registers clobbered:
 ;  d0
 blitcode:
 			add.l	#3, d0

@@ -3,4 +3,6 @@
 *.cof
 *.bin
 *.abs
+*.rom
+*.j64
 virtualjaguar.log
