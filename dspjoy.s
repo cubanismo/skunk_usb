@@ -397,20 +397,26 @@ dsptmr1:	addq	#1, rtime		; Add one to time value
 			addq	#4, isr_sp
 			jump	(risrtmp0)
 			store	risrflags, (risrflgptr)
-dspdata:
 
+; The following essentially defines a bss section in DSP local memory.
+; Start by aligning it to a phrase-sized offset
 			.phrase
-; Data stored in DSP memory
-_butsmem0:	.ds.l	1
-_butsmem1:	.ds.l	1
-_joydbuf:	.ds.l	24
-_joyevbuf:	.ds.l	EVBUFSIZE
+dspbss:		; Declare the start address of the section
+
+; Now declare the uninitialize variables stored in DSP memory
+_butsmem0	.equ	dspbss		; 1xlong
+_butsmem1	.equ	_butsmem0+4	; 1xlong
+_joydbuf	.equ	_butsmem1+4	; 24xlong
+_joyevbuf	.equ	_joydbuf+(24*4)	; EVBUFSIZExlong
+
+; Mark the end of the bss section
+dspbssx		.equ	_joyevbuf+(EVBUFSIZE*4)
 
 			.68000
 dspcodex:
 
-.print "dspcode size: ",/u/w (dspdata-D_RAM), " bytes."
-.print "dspcode+dspdata size: ",/u/w (dspcodex-dspcode), " bytes."
+.print "dspcode size: ",/u/w (dspcodex-dspcode), " bytes."
+.print "dspbss size: ",/u/w (dspbssx-dspbss), " bytes."
 
 			.bss
 			.long
