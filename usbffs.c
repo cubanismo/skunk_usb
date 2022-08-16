@@ -169,10 +169,12 @@ static long read_file(void *priv, char *buf, unsigned int bytes)
 	return bytes;
 }
 
-static void flash(const char *file) {
+static unsigned long flash(const char *file) {
 	FRESULT res;
 	struct FlashData data;
+	unsigned long startAddr;
 	unsigned short flashLines;
+	unsigned int bytesRead;
 
 	data.totalBlocks = 70; /* Erase entire 4MB bank by default */
 	data.erasedBlocks = 0;
@@ -184,8 +186,28 @@ static void flash(const char *file) {
 
 	if (res != FR_OK) {
 		CHECKEDPF("Error opening ROM file '%s': %s\n", path, fresToStr(res));
-		return;
+		return 0;
 	}
+
+	/* Skip to start address in ROM header  */
+	res = f_lseek(&data.f, 0x404);
+
+	if (res != FR_OK || f_tell(&data.f) != 0x404) {
+		CHECKEDPF("Error seeking to start address in ROM header: %s\n",
+				  fresToStr(res));
+		f_close(&data.f);
+		return 0;
+	}
+
+	res = f_read(&data.f, &startAddr, sizeof(startAddr), &bytesRead);
+
+	if (res != FR_OK || bytesRead != sizeof(startAddr)) {
+		CHECKEDPF("Error reading ROM start address: %s\n", fresToStr(res));
+		f_close(&data.f);
+		return 0;
+	}
+
+	CHECKEDPF("ROM start address from header: 0x%08lx\n", startAddr);
 
 	/* Skip ROM header */
 	res = f_lseek(&data.f, 0x2000);
@@ -193,7 +215,7 @@ static void flash(const char *file) {
 	if (res != FR_OK || f_tell(&data.f) != 0x2000) {
 		CHECKEDPF("Error seeking past ROM header: %s\n", fresToStr(res));
 		f_close(&data.f);
-		return;
+		return 0;
 	}
 
 	if (f_size(&data.f) <= 0x200000ul) {
@@ -214,6 +236,8 @@ static void flash(const char *file) {
 	f_close(&data.f);
 
 	CHECKEDPF("Flashing complete\n");
+
+	return startAddr;
 }
 
 enum {
@@ -433,11 +457,13 @@ static void cd(const char *newdir) {
 #define DRIVE "0"
 
 static void dorom(const char *fname) {
+	unsigned long startAddr = 0x802000;
+
 	CHECKEDPF("Stopping DSP\n");
 	stopdsp();
 	if (fname) {
 		CHECKEDPF("Flashing\n");
-		flash(fname);
+		startAddr = flash(fname);
 	}
 	CHECKEDPF("Unmounting drive\n");
 	f_unmount(DRIVE);
@@ -449,7 +475,7 @@ static void dorom(const char *fname) {
 		skunkCONSOLECLOSE();
 	}
 #endif /* defined(USE_SKUNK) */
-	launchrom();
+	launchrom(startAddr);
 }
 
 void start(void) {

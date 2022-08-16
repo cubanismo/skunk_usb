@@ -226,8 +226,8 @@ _launchrom:
 
 		jsr		resetezhost
 
+		move.l	(4,a7), a0			; Get the start address
 		move.l	#INITSTACK, a7		; Set Atari's default stack
-		move.l	#$802000, a0
 		jsr		(a0)				; Go! Go! Go!
 		rts							; Unreachable
 
