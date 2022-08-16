@@ -584,26 +584,26 @@ static int initusbdev(USBDev *dev)
 	haddr = LCP_R0;
 	i = hread;
 
-	if (i & 0x2) {
-		printf("No device connected\r\n");
-		return -2;
-	} else {
-		// Pause to give the device some time to get ready after reset.
-		// Some devices seem to need this, some don't.
-		for (i = 0; i < 1000000; i++);
-	}
-
 	printf("%s-speed device detected on port %d\r\n",
 		   (i & 1) ? "Low" : "Full", dev->port);
 
-	devNum = 2;
-	s2 = usbctlmsg(dev, 0, 5, devNum, 0, null, 0);	// Set USB device address to 2
+	if (i & 0x2) {
+		printf("No device connected\r\n");
+		return -2;
+	}
+
+	retry = 0;
+	do {
+		devNum = 2;
+		s2 = usbctlmsg(dev, 0, 5, devNum, 0, null, 0);	// Set USB device address to 2
+	} while ((0 != s2) && (++retry < 100));
+
 	assert(0==s2);
 	dev->dev = devNum;
 	retry = 0;
 	do {
 		s3 = usbctlmsg(dev, 0x80, 6, 0x100, 0, (char*)test, 18); 	// Read device descriptor
-	} while (((0 != s3) || (1 != test[1])) && (retry++ < 100));
+	} while (((0 != s3) || (1 != test[1])) && (++retry < 100));
 	assert(0==s3 && 1==test[1]);					// Make sure we got one
 	numconfigs = test[17];
 	
