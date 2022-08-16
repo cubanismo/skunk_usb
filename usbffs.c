@@ -18,6 +18,16 @@ extern void showgl(int show);
 extern volatile unsigned short doscale;
 extern volatile unsigned long ticks;
 
+#define MAX_DISPLAYED_GAMES (GL_HEIGHT / FNTHEIGHT)
+
+/*
+ * Note non-const global initializers don't work. We could clear BSS to
+ * zero-initialize everything, but the C runtime startup code that would
+ * initialize global variables isn't used by default, so globals must be
+ * initialized at runtime. The same likely applies to static variables in
+ * functions.
+ */
+
 #define NUM_DEVS 2
 static USBDev devs[NUM_DEVS];
 static BYTE initialized[NUM_DEVS];
@@ -27,8 +37,9 @@ static char input[1024];
 static FATFS fs;
 static DIR dir;
 static FILINFO fi[1024];
-static unsigned short numFiles = 0;
-static BYTE consoleBusy = 0;
+static unsigned short numFiles;
+static short scrollStart;
+static BYTE consoleBusy;
 
 struct FlashData {
 	FIL f;
@@ -211,12 +222,48 @@ enum {
 	SELECT_VAL_MASK	= SELECT_ADD | SELECT_SET,
 } SelectOps;
 
+static void resetscroll(void)
+{
+	scrollStart = 0;
+}
+
+static void scroll(short selection)
+{
+	unsigned coord = 0;
+	short needDraw = 0;
+	short idx;
+
+	if (selection < scrollStart)
+	{
+		scrollStart = selection;
+		needDraw = 1;
+	}
+
+	if (selection >= (scrollStart + MAX_DISPLAYED_GAMES)) {
+		scrollStart = (selection - MAX_DISPLAYED_GAMES) + 1;
+		needDraw = 1;
+	}
+
+	if (!needDraw)
+		return;
+
+	clrgamelst();
+	for (idx = scrollStart; idx < (scrollStart + MAX_DISPLAYED_GAMES); idx++) {
+		if (idx >= numFiles) break;
+
+		sprintf(input, "%s%s",
+				fi[idx].fname, (fi[idx].fattrib & AM_DIR) ? "/" : "");
+		drawstring(gamelstbm, coord, input);
+		coord += (FNTHEIGHT << 16);
+	}
+}
+
 static short select(unsigned short op, short val) {
 	static short selection = -1;
 	short newSelection = selection;
 	if ((selection >= 0) && (op & SELECT_CLR)) {
 		invertrect(gamelstbm,
-				   ((selection * FNTHEIGHT) << 16) | 0,
+				   (((selection - scrollStart)* FNTHEIGHT) << 16) | 0,
 				   (FNTHEIGHT << 16) | GL_WIDTH);
 	}
 
@@ -247,8 +294,9 @@ static short select(unsigned short op, short val) {
 	selection = newSelection;
 
 	if ((selection >= 0) && (op & SELECT_DRAW)) {
+		scroll(selection);
 		invertrect(gamelstbm,
-				   ((selection * FNTHEIGHT) << 16) | 0,
+				   (((selection - scrollStart) * FNTHEIGHT) << 16) | 0,
 				   (FNTHEIGHT << 16) | GL_WIDTH);
 	}
 
@@ -268,6 +316,8 @@ static void ls(void) {
 		return;
 	}
 
+	resetscroll();
+
 	for (idx = 0; 1; idx++) {
 		res = f_readdir(&dir, &fi[idx]);
 		if (res != FR_OK) {
@@ -282,8 +332,10 @@ static void ls(void) {
 		sprintf(input, "%s%s",
 				fi[idx].fname, (fi[idx].fattrib & AM_DIR) ? "/" : "");
 
-		drawstring(gamelstbm, coord, input);
-		coord += (12 << 16);
+		if (idx < MAX_DISPLAYED_GAMES) {
+			drawstring(gamelstbm, coord, input);
+			coord += (FNTHEIGHT << 16);
+		}
 
 		CHECKEDPF("%s\n", input);
 	}
@@ -377,6 +429,9 @@ void start(void) {
 		initialized[i] = 0;
 	}
 
+	consoleBusy = 0;
+	numFiles = 0;
+
 #if defined(USE_SKUNK)
 	skunkRESET();
 	skunkNOP();
@@ -421,7 +476,7 @@ void start(void) {
 						break;
 					case JB_B:
 						idx = select(0, 0);
-						if (idx > 0) {
+						if (idx >= 0) {
 							if (fi[idx].fattrib & AM_DIR) {
 								cd(fi[idx].fname);
 								ls();
@@ -478,7 +533,7 @@ void start(void) {
 			clrgamelst();
 		} else if (!strcmp("drawstring", input)) {
 			drawstring(gamelstbm, (0 << 16) | 0, "Hello you big, beautiful world!");
-			drawstring(gamelstbm, (12 << 16) | 0, "12345678901234567890");
+			drawstring(gamelstbm, (FNTHEIGHT << 16) | 0, "12345678901234567890");
 		} else if (!strcmp("next", input)) {
 			select(SELECT_CLR|SELECT_DRAW|SELECT_ADD, 1);
 		} else if (!strcmp("prev", input)) {
