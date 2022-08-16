@@ -18,7 +18,9 @@ extern void showgl(int show);
 extern volatile unsigned short doscale;
 extern volatile unsigned long ticks;
 
+#define AM_SKUNKUSB_CDUP 0x80 /* Hacky, but max used by FFS is 0x20 */
 #define MAX_DISPLAYED_GAMES (GL_HEIGHT / FNTHEIGHT)
+#define CDUP_STRING "<Parent Directory>"
 
 /*
  * Note non-const global initializers don't work. We could clear BSS to
@@ -303,6 +305,22 @@ static short select(unsigned short op, short val) {
 	return selection;
 }
 
+static short attopdir(void)
+{
+	int numslash = 0;
+	int i;
+
+	for (i = 0; cwd[i]; i++) {
+		if (cwd[i] == '/') {
+			if (++numslash > 1) {
+				return 0;
+			}
+		}
+	}
+
+	return 1;
+}
+
 static void ls(void) {
 	unsigned coord = 0;
 	unsigned idx = 0;
@@ -318,7 +336,19 @@ static void ls(void) {
 
 	resetscroll();
 
-	for (idx = 0; 1; idx++) {
+	idx = 0;
+	if (!attopdir()) {
+		/* Insert a fake file that moves up a directory */
+		sprintf(fi[idx].fname, "%s", CDUP_STRING);
+		fi[idx].fattrib = AM_DIR | AM_SKUNKUSB_CDUP;
+
+		drawstring(gamelstbm, coord, fi[idx].fname);
+		coord += (FNTHEIGHT << 16);
+
+		idx++;
+	}
+
+	for (; 1; idx++) {
 		res = f_readdir(&dir, &fi[idx]);
 		if (res != FR_OK) {
 			CHECKEDPF("Failed to read next file in dir: %s\n", fresToStr(res));
@@ -330,7 +360,9 @@ static void ls(void) {
 		}
 
 		sprintf(input, "%s%s",
-				fi[idx].fname, (fi[idx].fattrib & AM_DIR) ? "/" : "");
+				fi[idx].fname,
+				((fi[idx].fattrib & (AM_DIR | AM_SKUNKUSB_CDUP)) == AM_DIR) ?
+				"/" : "");
 
 		if (idx < MAX_DISPLAYED_GAMES) {
 			drawstring(gamelstbm, coord, input);
@@ -478,7 +510,11 @@ void start(void) {
 						idx = select(0, 0);
 						if (idx >= 0) {
 							if (fi[idx].fattrib & AM_DIR) {
-								cd(fi[idx].fname);
+								if (fi[idx].fattrib & AM_SKUNKUSB_CDUP) {
+									cd("..");
+								} else {
+									cd(fi[idx].fname);
+								}
 								ls();
 							} else {
 								dorom(fi[idx].fname /* Flash ROM and launch */);
